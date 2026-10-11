@@ -1,6 +1,6 @@
 /* Here be a small dragon.
  * Not as large as the monster 
- * in src/swindle.c
+ * in src/vindle.c
  * but you get the idea */
 
 #include "parser.h"
@@ -28,7 +28,7 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <libinput.h>
 
-/* Forward declarations from src/swindle.c  */
+/* Forward declarations from src/vindle.c  */
 extern struct wl_list mons;   
 extern struct wl_list clients; 
 void arrange(void *m);       
@@ -49,7 +49,7 @@ typedef struct {
 static void
 lua_log_error(lua_State *L, const char *context)
 {
-	fprintf(stderr, "swindle config [%s]: %s\n",
+	fprintf(stderr, "vindle config [%s]: %s\n",
 	        context, lua_tostring(L, -1));
 	lua_pop(L, 1);
 }
@@ -63,8 +63,10 @@ lua_get_string(lua_State *L, const char *key, char *buf, size_t bufsz)
 {
 	lua_getfield(L, -1, key);
 	bool ok = lua_isstring(L, -1);
-	if (ok)
+	if (ok && bufsz) {
 		strncpy(buf, lua_tostring(L, -1), bufsz - 1);
+		buf[bufsz - 1] = '\0';
+	}
 	lua_pop(L, 1);
 	return ok;
 }
@@ -130,7 +132,86 @@ parse_modifier(const char *name)
 	if (!strcmp(name, "mod2"))  return WLR_MODIFIER_MOD2;
 	if (!strcmp(name, "mod3"))  return WLR_MODIFIER_MOD3;
 	if (!strcmp(name, "mod5"))  return WLR_MODIFIER_MOD5;
-	fprintf(stderr, "swindle config: unknown modifier '%s', ignoring\n", name);
+	fprintf(stderr, "vindle config: unknown modifier '%s', ignoring\n", name);
+	return 0;
+}
+
+/* Warn about keys the parser does not read. Catches typos like
+ * border_px instead of inner_border_px. Table must be on top. */
+static void
+warn_unknown_keys(lua_State *L, const char *section,
+		const char *const *known, size_t nknown)
+{
+	int t = lua_absindex(L, -1);
+	lua_pushnil(L);
+	while (lua_next(L, t) != 0) {
+		if (lua_type(L, -2) == LUA_TSTRING) {
+			const char *key = lua_tostring(L, -2);
+			size_t i;
+			for (i = 0; i < nknown; i++)
+				if (!strcmp(key, known[i]))
+					break;
+			if (i == nknown)
+				fprintf(stderr, "vindle config: unknown key '%s' in '%s', ignoring\n",
+				        key, section);
+		}
+		lua_pop(L, 1);
+	}
+}
+
+static const char *const appearance_keys[] = {
+	"inner_border_px", "outer_border_px", "gaps", "smart_gaps",
+	"root_color", "inner_border_color", "outer_border_color",
+	"inner_focus_color", "outer_focus_color",
+	"inner_urgent_color", "outer_urgent_color", "fullscreen_bg",
+};
+
+static const char *const input_keys[] = {
+	"repeat_rate", "repeat_delay", "tap_to_click", "tap_and_drag",
+	"drag_lock", "natural_scrolling", "disable_while_typing",
+	"left_handed", "middle_button_emulation", "accel_speed",
+	"layout", "variant", "options", "scroll_method", "accel_profile",
+	"click_method", "send_events_mode", "tap_button_map",
+};
+
+static const char *const rule_keys[] = {
+	"app_id", "title", "tags", "floating", "monitor",
+};
+
+static const char *const monitor_keys[] = {
+	"name", "mfact", "nmaster", "scale", "x", "y", "transform", "layout",
+};
+
+static const char *const bind_keys[] = {
+	"mods", "key", "action", "args",
+};
+
+static const char *const button_keys[] = {
+	"mods", "button", "action", "args",
+};
+
+static const char *const toplevel_keys[] = {
+	"sloppy_focus", "bypass_surface_visibility", "log_level",
+	"appearance", "input", "rules", "monitors",
+	"keybinds", "buttons", "autostart",
+};
+
+/* __newindex guard on _G: warns on unknown top-level keys at assignment
+ * time, then really assigns (rawset). Only fires for absent keys, so
+ * stdlib is unaffected. */
+static int
+toplevel_guard(lua_State *L)
+{
+	if (lua_type(L, 2) == LUA_TSTRING) {
+		const char *key = lua_tostring(L, 2);
+		size_t i, n = sizeof(toplevel_keys) / sizeof(toplevel_keys[0]);
+		for (i = 0; i < n; i++)
+			if (!strcmp(key, toplevel_keys[i]))
+				break;
+		if (i == n)
+			fprintf(stderr, "vindle config: unknown top-level key '%s'\n", key);
+	}
+	lua_rawset(L, 1);
 	return 0;
 }
 
@@ -141,7 +222,7 @@ parse_appearance(lua_State *L, CfgAppearance *a)
 {
 	lua_getglobal(L, "appearance");
 	if (!lua_istable(L, -1)) {
-		fprintf(stderr, "swindle config: 'appearance' table missing' \n");
+		fprintf(stderr, "vindle config: 'appearance' table missing\n");
 		lua_pop(L, 1);
 		/* defaults */
 		a->inner_border_px = 1;
@@ -183,6 +264,8 @@ parse_appearance(lua_State *L, CfgAppearance *a)
 	}
 	lua_pop(L, 1);
 
+	warn_unknown_keys(L, "appearance", appearance_keys,
+	                  sizeof(appearance_keys) / sizeof(appearance_keys[0]));
 	lua_pop(L, 1); /* pop appearance table */
 }
 
@@ -191,13 +274,16 @@ parse_input(lua_State *L, CfgInput *inp)
 {
 	lua_getglobal(L, "input");
 	if (!lua_istable(L, -1)) {
-		fprintf(stderr, "swindle config: 'input' table missing, "
+		fprintf(stderr, "vindle config: 'input' table missing, "
 		        "using defaults. You'll feel the repeat delay.\n");
 		lua_pop(L, 1);
 		inp->repeat_rate  = 50;
 		inp->repeat_delay = 150;
 		inp->tap_to_click = true;
 		inp->accel_profile = LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE;
+		inp->layout[0] = '\0';
+		inp->variant[0] = '\0';
+		inp->options[0] = '\0';
 		return;
 	}
 
@@ -211,6 +297,15 @@ parse_input(lua_State *L, CfgInput *inp)
 	inp->left_handed            = lua_get_bool(L, "left_handed",            false);
 	inp->middle_button_emulation= lua_get_bool(L, "middle_button_emulation",false);
 	inp->accel_speed            = lua_get_double(L, "accel_speed",          0.0);
+
+	/* XKB layout: layout/variant/options strings, e.g. layout="us,ru",
+	 * options="grp:alt_shift_toggle". Missing/empty = XKB default. */
+	if (!lua_get_string(L, "layout", inp->layout, sizeof(inp->layout)))
+		inp->layout[0] = '\0';
+	if (!lua_get_string(L, "variant", inp->variant, sizeof(inp->variant)))
+		inp->variant[0] = '\0';
+	if (!lua_get_string(L, "options", inp->options, sizeof(inp->options)))
+		inp->options[0] = '\0';
 
 	char scratch[CFG_MAX_STRLEN] = {0};
 
@@ -238,6 +333,8 @@ parse_input(lua_State *L, CfgInput *inp)
 	if (!strcmp(scratch, "lmr")) inp->tap_button_map = LIBINPUT_CONFIG_TAP_MAP_LMR;
 	else                         inp->tap_button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
 
+	warn_unknown_keys(L, "input", input_keys,
+	                  sizeof(input_keys) / sizeof(input_keys[0]));
 	lua_pop(L, 1);
 }
 
@@ -263,6 +360,8 @@ parse_rules(lua_State *L, Config *cfg)
 		r->tags     = (uint32_t)lua_get_int(L, "tags",     0);
 		r->floating = lua_get_bool(L, "floating", false);
 		r->monitor  = lua_get_int(L, "monitor", -1);
+		warn_unknown_keys(L, "rules[]", rule_keys,
+		                  sizeof(rule_keys) / sizeof(rule_keys[0]));
 
 		lua_pop(L, 1);
 	}
@@ -296,8 +395,10 @@ parse_monitors(lua_State *L, Config *cfg)
 		memset(m, 0, sizeof(*m));
 
 		lua_getfield(L, -1, "name");
-		if (lua_isstring(L, -1))
+		if (lua_isstring(L, -1)) {
 			strncpy(m->name, lua_tostring(L, -1), sizeof(m->name)-1);
+			m->name[sizeof(m->name)-1] = '\0';
+		}
 		lua_pop(L, 1);
 
 		m->mfact   = (float)lua_get_double(L, "mfact",   0.55);
@@ -308,6 +409,8 @@ parse_monitors(lua_State *L, Config *cfg)
 		m->transform =      lua_get_int   (L, "transform", 0);
 		lua_get_string(L, "layout", m->layout, sizeof(m->layout));
 		if (!m->layout[0]) strcpy(m->layout, "dwindle");
+		warn_unknown_keys(L, "monitors[]", monitor_keys,
+		                  sizeof(monitor_keys) / sizeof(monitor_keys[0]));
 
 		lua_pop(L, 1);
 	}
@@ -324,7 +427,6 @@ parse_keybinds(lua_State *L, Config *cfg)
 	}
 
 	cfg->nkeybinds = 0;
-	struct xkb_context *xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 
 	int n = (int)lua_rawlen(L, -1);
 	for (int i = 1; i <= n && cfg->nkeybinds < CFG_MAX_KEYBINDS; i++) {
@@ -353,7 +455,7 @@ parse_keybinds(lua_State *L, Config *cfg)
 		lua_get_string(L, "key", keyname, sizeof(keyname));
 		kb->key = xkb_keysym_from_name(keyname, XKB_KEYSYM_CASE_INSENSITIVE);
 		if (kb->key == XKB_KEY_NoSymbol) {
-			fprintf(stderr, "swindle config: unknown key '%s', skipping bind\n",
+			fprintf(stderr, "vindle config: unknown key '%s', skipping bind\n",
 			        keyname);
 			lua_pop(L, 1); /* keybind entry table */
 			continue;
@@ -368,20 +470,24 @@ parse_keybinds(lua_State *L, Config *cfg)
 			int na = (int)lua_rawlen(L, -1);
 			for (int a = 1; a <= na && kb->nargs < CFG_MAX_ARGS; a++) {
 				lua_rawgeti(L, -1, a);
-				if (lua_isstring(L, -1))
-					strncpy(kb->args[kb->nargs++],
+				if (lua_isstring(L, -1)) {
+					strncpy(kb->args[kb->nargs],
 					        lua_tostring(L, -1),
 					        CFG_MAX_STRLEN - 1);
+					kb->args[kb->nargs][CFG_MAX_STRLEN - 1] = '\0';
+					kb->nargs++;
+				}
 				lua_pop(L, 1);
 			}
 		}
 		lua_pop(L, 1); /* args */
 
+		warn_unknown_keys(L, "keybinds[]", bind_keys,
+		                  sizeof(bind_keys) / sizeof(bind_keys[0]));
 		cfg->nkeybinds++;
 		lua_pop(L, 1); /* keybind entry */
 	}
 
-	xkb_context_unref(xkb_ctx);
 	lua_pop(L, 1); /* keybinds table */
 }
 
@@ -431,15 +537,20 @@ parse_buttons(lua_State *L, Config *cfg)
 			int na = (int)lua_rawlen(L, -1);
 			for (int a = 1; a <= na && b->nargs < CFG_MAX_ARGS; a++) {
 				lua_rawgeti(L, -1, a);
-				if (lua_isstring(L, -1))
-					strncpy(b->args[b->nargs++],
+				if (lua_isstring(L, -1)) {
+					strncpy(b->args[b->nargs],
 					        lua_tostring(L, -1),
 					        CFG_MAX_STRLEN - 1);
+					b->args[b->nargs][CFG_MAX_STRLEN - 1] = '\0';
+					b->nargs++;
+				}
 				lua_pop(L, 1);
 			}
 		}
 		lua_pop(L, 1); /* args */
 
+		warn_unknown_keys(L, "buttons[]", button_keys,
+		                  sizeof(button_keys) / sizeof(button_keys[0]));
 		lua_pop(L, 1);
 	}
 	lua_pop(L, 1);
@@ -465,6 +576,7 @@ parse_autostart(lua_State *L, Config *cfg)
 		strncpy(cfg->autostart[cfg->nautostart].cmd,
 		        lua_tostring(L, -1),
 		        CFG_MAX_AUTOSTART_CMD - 1);
+		cfg->autostart[cfg->nautostart].cmd[CFG_MAX_AUTOSTART_CMD - 1] = '\0';
 		cfg->nautostart++;
 		lua_pop(L, 1);
 	}
@@ -478,11 +590,11 @@ config_get_path(char *buf, size_t bufsz)
 {
 	const char *xdg = getenv("XDG_CONFIG_HOME");
 	if (xdg && *xdg)
-		snprintf(buf, bufsz, "%s/swindle/config.lua", xdg);
+		snprintf(buf, bufsz, "%s/vindle/config.lua", xdg);
 	else {
 		const char *home = getenv("HOME");
 		if (!home) home = "/root"; /* you're probably root, aren't you */
-		snprintf(buf, bufsz, "%s/.config/swindle/config.lua", home);
+		snprintf(buf, bufsz, "%s/.config/vindle/config.lua", home);
 	}
 	return buf;
 }
@@ -494,11 +606,20 @@ config_load(const char *path, Config *cfg)
 
 	lua_State *L = luaL_newstate();
 	if (!L) {
-		fprintf(stderr, "swindle config: failed to create Lua state. "
+		fprintf(stderr, "vindle config: failed to create Lua state. "
 		        "Truly rock bottom.\n");
 		return -1;
 	}
 	luaL_openlibs(L);
+
+	/* Warn on unknown top-level keys (typos). Fires only for new keys,
+	 * stdlib is unaffected. Assignment still happens via rawset. */
+	lua_pushglobaltable(L);
+	lua_newtable(L);
+	lua_pushcfunction(L, toplevel_guard);
+	lua_setfield(L, -2, "__newindex");
+	lua_setmetatable(L, -2);
+	lua_pop(L, 1);
 
 	if (luaL_dofile(L, path) != LUA_OK) {
 		lua_log_error(L, "load");
@@ -568,7 +689,7 @@ config_autostart_run(const Config *cfg)
 
 	pid_t pid = fork();
 	if (pid < 0) {
-		perror("swindle autostart: fork");
+		perror("vindle autostart: fork");
 		return;
 	}
 	if (pid != 0)
@@ -585,13 +706,13 @@ config_autostart_run(const Config *cfg)
 
 		pid_t cpid = fork();
 		if (cpid < 0) {
-			fprintf(stderr, "swindle autostart: fork for '%s': %s\n",
+			fprintf(stderr, "vindle autostart: fork for '%s': %s\n",
 			        cmd, strerror(errno));
 			continue;
 		}
 		if (cpid == 0) {
 			execl("/bin/sh", "sh", "-c", cmd, NULL);
-			fprintf(stderr, "swindle autostart: exec '%s': %s\n",
+			fprintf(stderr, "vindle autostart: exec '%s': %s\n",
 			        cmd, strerror(errno));
 			_exit(1);
 		}
@@ -610,7 +731,7 @@ config_autostart_run(const Config *cfg)
 			if (r == cpid) {
 				done = 1;
 				if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
-					fprintf(stderr, "swindle autostart: '%s' exited with status %d\n",
+					fprintf(stderr, "vindle autostart: '%s' exited with status %d\n",
 					        cmd, WEXITSTATUS(status));
 			} else {
 				clock_gettime(CLOCK_MONOTONIC, &now);
@@ -634,12 +755,33 @@ watch_dispatch(int fd, uint32_t mask, void *data)
 {
 	WatchState *ws = data;
 
-	/* Drain the inotify events */
+	/* Drain the inotify events. Reload only on real content changes;
+	 * control events (IN_IGNORED, overflow) must not retrigger,
+	 * or the watcher busy-loops on its own re-arm. */
 	_Alignas(struct inotify_event) char buf[4096];
 	ssize_t len = read(fd, buf, sizeof(buf));
-	if (len < 0) {
-		if (errno != EAGAIN)
-			perror("swindle config: inotify read");
+	if (len <= 0) {
+		if (len < 0 && errno != EAGAIN)
+			perror("vindle config: inotify read");
+		return 0;
+	}
+
+	int changed = 0, rearm = 0;
+	for (char *p = buf; p < buf + len; ) {
+		struct inotify_event *e = (struct inotify_event *)p;
+		if (e->mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE |
+		               IN_Q_OVERFLOW))
+			changed = 1;
+		if (e->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF))
+			rearm = 1;
+		p += sizeof(*e) + e->len;
+	}
+	if (!changed) {
+		/* Watch died (editor delete-recreate) with no content event:
+		 * re-arm quietly so future saves are still seen. */
+		if (rearm)
+			ws->watch_fd = inotify_add_watch(ws->inotify_fd, ws->path,
+			                                  IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE);
 		return 0;
 	}
 
@@ -648,11 +790,11 @@ watch_dispatch(int fd, uint32_t mask, void *data)
 	if (!fresh) return 0;
 
 	if (config_load(ws->path, fresh) == 0) {
-		fprintf(stderr, "swindle config: reloaded '%s'\n", ws->path);
+		fprintf(stderr, "vindle config: reloaded '%s'\n", ws->path);
 		if (ws->cb)
 			ws->cb(fresh, ws->userdata);
 	} else {
-		fprintf(stderr, "swindle config: reload failed, keeping old config. "
+		fprintf(stderr, "vindle config: reload failed, keeping old config. "
 		        "Story of my life.\n");
 	}
 
@@ -660,10 +802,12 @@ watch_dispatch(int fd, uint32_t mask, void *data)
 
 	/*
 	 * Some editors (vim, nano) delete-and-recreate files on save,
-	 * which removes our watch (which is a pain in the ass. 
-	 * Hence, re-add it defensively. It's good for the soul)
+	 * which removes our watch (which is a pain in the ass.
+	 * Hence, re-add it defensively. It's good for the soul).
+	 * No rm_watch first: it queues IN_IGNORED, which retriggers
+	 * this handler into a busy loop. add_watch on a live path
+	 * just updates the mask.
 	 */
-	inotify_rm_watch(ws->inotify_fd, ws->watch_fd);
 	ws->watch_fd = inotify_add_watch(ws->inotify_fd, ws->path,
 	                                  IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE);
 
@@ -679,7 +823,7 @@ config_watch_start(struct wl_event_loop *loop, const char *path,
 
 	ws->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (ws->inotify_fd < 0) {
-		perror("swindle config: inotify_init1");
+		perror("vindle config: inotify_init1");
 		free(ws);
 		return NULL;
 	}
@@ -687,13 +831,14 @@ config_watch_start(struct wl_event_loop *loop, const char *path,
 	ws->watch_fd = inotify_add_watch(ws->inotify_fd, path,
 	                                  IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE);
 	if (ws->watch_fd < 0) {
-		perror("swindle config: inotify_add_watch");
+		perror("vindle config: inotify_add_watch");
 		close(ws->inotify_fd);
 		free(ws);
 		return NULL;
 	}
 
 	strncpy(ws->path, path, sizeof(ws->path) - 1);
+	ws->path[sizeof(ws->path) - 1] = '\0';
 	ws->cb       = cb;
 	ws->userdata = userdata;
 
@@ -704,7 +849,7 @@ config_watch_start(struct wl_event_loop *loop, const char *path,
 	);
 
 	if (!src) {
-		fprintf(stderr, "swindle config: failed to add inotify to event loop. "
+		fprintf(stderr, "vindle config: failed to add inotify to event loop. "
 		        "Classic.\n");
 		close(ws->inotify_fd);
 		free(ws);
@@ -712,7 +857,7 @@ config_watch_start(struct wl_event_loop *loop, const char *path,
 	}
 
 	ws->event_src = src;
-	fprintf(stderr, "swindle config: watching '%s'\n", path);
+	fprintf(stderr, "vindle config: watching '%s'\n", path);
 	return (struct wl_event_source *)ws;
 }
 

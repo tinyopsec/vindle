@@ -1,5 +1,5 @@
-#ifndef SWINDLE_PARSER_H
-#define SWINDLE_PARSER_H
+#ifndef VINDLE_PARSER_H
+#define VINDLE_PARSER_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -49,6 +49,10 @@ typedef struct {
 	int    accel_profile;   /* libinput enum value */
 	double accel_speed;
 	int    tap_button_map;  /* libinput enum value */
+	/* XKB keyboard layout, e.g. "us,ru". Empty = default. */
+	char   layout[CFG_MAX_STRLEN];
+	char   variant[CFG_MAX_STRLEN];
+	char   options[CFG_MAX_STRLEN];
 } CfgInput;
 
 /* Window Rules  */

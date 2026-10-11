@@ -1,13 +1,10 @@
-swindle
+vindle
 smsg/smsg
 *.o
 *-protocol.c
 *-protocol.h
 smsg/*-protocol.c
 smsg/*-protocol.h
-result
-result-*
-.direnv/
 .vscode/
 .idea/
 .cache/

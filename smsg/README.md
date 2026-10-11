@@ -1,4 +1,4 @@
-**smsg** - send ipc messages to swindle (forked from [this repository](https://codeberg.org/notchoc/dwlmsg))
+**smsg** - send ipc messages to vindle (forked from [this repository](https://codeberg.org/notchoc/dwlmsg))
 
 ```
 usage:	smsg [-OTLPF]

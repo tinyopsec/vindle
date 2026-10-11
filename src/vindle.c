@@ -86,7 +86,7 @@
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
 
 /* enums */
-enum { CurNormal, CurPressed, CurMove, CurResize, CurTileDrag }; /* cursor */
+enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
 enum { XDGShell, LayerShell, X11 }; /* client types */
 enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS }; /* scene layers */
 
@@ -299,11 +299,7 @@ static void closemon(Monitor *m);
 static void dwindle_free_tree(DwindleNode *n);
 static void dwindle_remove_client(Client *c);
 static void dwindle_insert(DwindleNode **root, Client *new_c, Client *focused, DwindleHint *hint);
-static int dwindle_insert_at_edge(DwindleNode **root, Client *new_c, Client *target, DwindleEdge edge);
 static void dwindle_remove(DwindleNode **root, Client *c, DwindleHint *hint);
-static DwindleEdge edge_at_point(struct wlr_box box, double x, double y);
-static struct wlr_box preselect_indicator_box(struct wlr_box target, DwindleEdge edge);
-static Client *tiled_client_at(double x, double y, Client *exclude);
 static inline int current_tag_idx(Monitor *m);
 static void commitlayersurfacenotify(struct wl_listener *listener, void *data);
 static void commitnotify(struct wl_listener *listener, void *data);
@@ -337,8 +333,6 @@ static void focusclient(Client *c, int lift);
 static void focusmon(const Arg *arg);
 static void focusdir(const Arg *arg);
 static void swapdir(const Arg *arg);
-static void swaptiled(Client *a, Client *b);
-static void dwindle_move_to_edge(Client *a, Client *b, DwindleEdge edge);
 static Client *focustop(Monitor *m);
 static void fullscreennotify(struct wl_listener *listener, void *data);
 static void gpureset(struct wl_listener *listener, void *data);
@@ -452,20 +446,8 @@ static unsigned int cursor_mode;
 static Client *grabc;
 static int grabcx, grabcy; /* client-relative */
 
-/* Tile-drag preselect recomputes every motion event while cursor_mode ==
- CurTileDrag edge == EDGE_NONE means "dead centre of target, do a plain
- swap on release"." */
-static Client *preselect_target;
-static DwindleEdge preselect_edge;
-static struct wlr_scene_rect *preselect_indicator;
-
-/* Fixed size grabc is resized to the moment a tile-drag starts, so it
- visually detaches and follows the cursor like a floating window rather
- than staying pinned at full tile size the whole gesture. Deliberately
- not "preserve original size" */
-#define TILEDRAG_DETACH_W 960
-#define TILEDRAG_DETACH_H 540
-static struct wlr_box tiledrag_orig_geom; 
+/* Tile-drag keeps the window's tile size for the whole gesture and only
+ * detaches it to the float layer: grab where held, drop where released. */
 
 static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
@@ -727,27 +709,13 @@ buttonpress(struct wl_listener *listener, void *data)
 		/* If you released any buttons, we exit interactive move/resize mode. */
 		if (!locked && cursor_mode != CurNormal && cursor_mode != CurPressed) {
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
-			if (cursor_mode == CurTileDrag) {
-				if (preselect_target && preselect_edge != EDGE_NONE) {
-					dwindle_move_to_edge(grabc, preselect_target, preselect_edge);
-				} else {
-					Client *target = tiled_client_at(cursor->x, cursor->y, grabc);
-					if (target)
-						swaptiled(grabc, target);
-					else
-						resize(grabc, tiledrag_orig_geom, 0);
-				}
-				wlr_scene_node_reparent(&grabc->scene->node, layers[LyrTile]);
-				preselect_target = NULL;
-				preselect_edge = EDGE_NONE;
-				wlr_scene_node_set_enabled(&preselect_indicator->node, false);
-				cursor_mode = CurNormal;
-				grabc = NULL;
-				return;
-			}
 			cursor_mode = CurNormal;
-			/* Drop the window off on its new monitor */
+			/* Drop the window off on its new monitor. xytomon may return
+			 * NULL between outputs; keep the old monitor then instead of
+			 * orphaning the client (c->mon = NULL hides it everywhere). */
 			selmon = xytomon(cursor->x, cursor->y);
+			if (!selmon)
+				selmon = grabc->mon;
 			setmon(grabc, selmon, 0);
 			grabc = NULL;
 			return;
@@ -765,7 +733,7 @@ void
 chvt(const Arg *arg)
 {
 	if (!session) {
-		fprintf(stderr, "swindle: chvt: no session (not running on DRM)\n");
+		fprintf(stderr, "vindle: chvt: no session (not running on DRM)\n");
 		return;
 	}
 	wlr_session_change_vt(session, arg->ui);
@@ -796,26 +764,33 @@ cleanup(void)
 	cfg_watch_src = NULL;
 	cleanuplisteners();
 #ifdef XWAYLAND
-	wlr_xwayland_destroy(xwayland);
-	xwayland = NULL;
+	if (xwayland) {
+		wlr_xwayland_destroy(xwayland);
+		xwayland = NULL;
+	}
 #endif
 	wl_display_destroy_clients(dpy);
 	if (child_pid > 0) {
 		kill(-child_pid, SIGTERM);
 		waitpid(child_pid, NULL, 0);
 	}
-	wlr_xcursor_manager_destroy(cursor_mgr);
+	if (cursor_mgr)
+		wlr_xcursor_manager_destroy(cursor_mgr);
 
-	destroykeyboardgroup(&kb_group->destroy, NULL);
+	if (kb_group)
+		destroykeyboardgroup(&kb_group->destroy, NULL);
 
 	/* If it's not destroyed manually, it will cause a use-after-free of wlr_seat.
 	 * Destroy it until it's fixed on the wlroots side */
-	wlr_backend_destroy(backend);
+	if (backend)
+		wlr_backend_destroy(backend);
 
-	wl_display_destroy(dpy);
+	if (dpy)
+		wl_display_destroy(dpy);
 	/* Destroy after the wayland display (when the monitors are already destroyed)
 	   to avoid destroying them with an invalid scene output. */
-	wlr_scene_node_destroy(&scene->tree.node);
+	if (scene)
+		wlr_scene_node_destroy(&scene->tree.node);
 }
 
 void
@@ -883,8 +858,12 @@ cleanuplisteners(void)
 	wl_list_remove(&start_drag.link);
 	wl_list_remove(&new_session_lock.link);
 #ifdef XWAYLAND
-	wl_list_remove(&new_xwayland_surface.link);
-	wl_list_remove(&xwayland_ready.link);
+	/* Added only when wlr_xwayland_create succeeds (see setup);
+	 * removing never-added listeners corrupts the list (B1). */
+	if (xwayland) {
+		wl_list_remove(&new_xwayland_surface.link);
+		wl_list_remove(&xwayland_ready.link);
+	}
 #endif
 }
 
@@ -1057,9 +1036,19 @@ createkeyboardgroup(void)
 	group->wlr_group = wlr_keyboard_group_create();
 	group->wlr_group->data = group;
 
-	/* Prepare an XKB keymap and assign it to the keyboard group. */
+	/* Prepare an XKB keymap and assign it to the keyboard group.
+	 * layout/variant/options come from input.* in config.lua,
+	 * e.g. layout = "us,ru", options = "grp:alt_shift_toggle".
+	 * Empty string = XKB default (pass NULL). */
 	context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-	if (!(keymap = xkb_keymap_new_from_names(context, &(struct xkb_rule_names){.options = NULL},
+	struct xkb_rule_names names = {
+		.rules   = NULL,
+		.model   = NULL,
+		.layout  = cfg.input.layout[0]  ? cfg.input.layout  : NULL,
+		.variant = cfg.input.variant[0] ? cfg.input.variant : NULL,
+		.options = cfg.input.options[0] ? cfg.input.options : NULL,
+	};
+	if (!(keymap = xkb_keymap_new_from_names(context, &names,
 				XKB_KEYMAP_COMPILE_NO_FLAGS)))
 		die("failed to compile keymap");
 
@@ -1844,19 +1833,28 @@ dispatch_action(const char *action, const char (*args)[CFG_MAX_STRLEN], int narg
 		return;
 	}
 
-	fprintf(stderr, "swindle: unknown action '%s'\n", action);
+	fprintf(stderr, "vindle: unknown action '%s'\n", action);
+}
+
+static const CfgKeybind *
+matchbind(uint32_t mods, xkb_keysym_t sym)
+{
+	for (int i = 0; i < cfg.nkeybinds; i++) {
+		const CfgKeybind *k = &cfg.keybinds[i];
+		if (CLEANMASK(mods) == CLEANMASK(k->mods)
+				&& xkb_keysym_to_lower(sym) == xkb_keysym_to_lower(k->key))
+			return k;
+	}
+	return NULL;
 }
 
 int
 keybinding(uint32_t mods, xkb_keysym_t sym)
 {
-	for (int i = 0; i < cfg.nkeybinds; i++) {
-		const CfgKeybind *k = &cfg.keybinds[i];
-		if (CLEANMASK(mods) == CLEANMASK(k->mods)
-				&& xkb_keysym_to_lower(sym) == xkb_keysym_to_lower(k->key)) {
-			dispatch_action(k->action, k->args, k->nargs);
-			return 1;
-		}
+	const CfgKeybind *k = matchbind(mods, sym);
+	if (k) {
+		dispatch_action(k->action, k->args, k->nargs);
+		return 1;
 	}
 	return 0;
 }
@@ -1886,13 +1884,45 @@ keypress(struct wl_listener *listener, void *data)
 	 * the config 
 	 */
 	const xkb_keysym_t *base_syms;
+	struct xkb_keymap *keymap =
+		xkb_state_get_keymap(group->wlr_group->keyboard.xkb_state);
+	xkb_layout_index_t active_layout =
+		xkb_state_key_get_layout(
+			group->wlr_group->keyboard.xkb_state, keycode);
 	int base_nsyms = xkb_keymap_key_get_syms_by_level(
-			xkb_state_get_keymap(group->wlr_group->keyboard.xkb_state),
+			keymap,
 			keycode,
-			xkb_state_key_get_layout(
-				group->wlr_group->keyboard.xkb_state, keycode),
+			active_layout,
 			0, /* level 0 = unshifted */
 			&base_syms);
+
+	/*
+	 * Layout-independent fallback for multi-layout keymaps
+	 * (e.g. "us,ru" or "ru,us"): binds are written in Latin
+	 * ("q", "d", "Return"), but with the "ru" group active xkb returns
+	 * Cyrillic syms both for the state-aware and the base-level query
+	 * above. Querying level 0 of every OTHER layout yields the Latin sym
+	 * of the same physical key regardless of group order, so Logo+q etc.
+	 * keep working whatever group is active. xkb caps at 4 groups.
+	 */
+#define VINDLE_MAX_FB_LAYOUTS 4
+	const xkb_keysym_t *fb_syms[VINDLE_MAX_FB_LAYOUTS];
+	int fb_nsyms[VINDLE_MAX_FB_LAYOUTS];
+	int fb_n = 0;
+	{
+		xkb_layout_index_t nlayouts =
+			xkb_keymap_num_layouts(keymap);
+		for (xkb_layout_index_t li = 0;
+				li < nlayouts && fb_n < VINDLE_MAX_FB_LAYOUTS; li++) {
+			int n;
+			if (li == active_layout)
+				continue;
+			n = xkb_keymap_key_get_syms_by_level(
+					keymap, keycode, li, 0, &fb_syms[fb_n]);
+			if (n > 0)
+				fb_nsyms[fb_n++] = n;
+		}
+	}
 
 	int handled = 0;
 	uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
@@ -1918,22 +1948,42 @@ keypress(struct wl_listener *listener, void *data)
 		}
 	}
 
-	 /* Try state-aware syms first, then base syms (catches shifted digit binds). */
+	 /* Try state-aware syms first, then base syms (catches shifted digit binds),
+	  * then other-layout level-0 syms (catches Latin binds while a
+	  * non-Latin group is active, whatever the group order). */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		for (i = 0; i < nsyms; i++)
-			handled = keybinding(mods, syms[i]) || handled;
-		if (!handled) {
-			for (i = 0; i < base_nsyms; i++)
-				handled = keybinding(mods, base_syms[i]) || handled;
+		const xkb_keysym_t *repeat_syms = NULL;
+		int repeat_nsyms = 0;
+		int f;
+		for (i = 0; i < nsyms; i++) {
+			int h = keybinding(mods, syms[i]);
+			handled = h || handled;
+			if (h && !repeat_syms) { repeat_syms = syms; repeat_nsyms = nsyms; }
 		}
-	}
-
-	if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
-		group->mods = mods;
-		group->keysyms = base_syms;
-		group->nsyms = base_nsyms;
-		wl_event_source_timer_update(group->key_repeat_source,
-				group->wlr_group->keyboard.repeat_info.delay);
+		if (!handled) {
+			for (i = 0; i < base_nsyms; i++) {
+				int h = keybinding(mods, base_syms[i]);
+				handled = h || handled;
+				if (h && !repeat_syms) { repeat_syms = base_syms; repeat_nsyms = base_nsyms; }
+			}
+		}
+		for (f = 0; f < fb_n && !handled; f++) {
+			for (i = 0; i < fb_nsyms[f]; i++) {
+				int h = keybinding(mods, fb_syms[f][i]);
+				handled = h || handled;
+				if (h && !repeat_syms) { repeat_syms = fb_syms[f]; repeat_nsyms = fb_nsyms[f]; }
+			}
+		}
+		if (handled && group->wlr_group->keyboard.repeat_info.delay > 0 && repeat_syms) {
+			group->mods = mods;
+			group->keysyms = repeat_syms;
+			group->nsyms = repeat_nsyms;
+			wl_event_source_timer_update(group->key_repeat_source,
+					group->wlr_group->keyboard.repeat_info.delay);
+		} else if (!handled) {
+			group->nsyms = 0;
+			wl_event_source_timer_update(group->key_repeat_source, 0);
+		}
 	} else {
 		group->nsyms = 0;
 		wl_event_source_timer_update(group->key_repeat_source, 0);
@@ -1972,8 +2022,10 @@ keyrepeat(void *data)
 	wl_event_source_timer_update(group->key_repeat_source,
 			1000 / group->wlr_group->keyboard.repeat_info.rate);
 
-	for (i = 0; i < group->nsyms; i++)
+	for (i = 0; i < group->nsyms; i++) {
+		/* All binds repeat while held, including spawn. */
 		keybinding(group->mods, group->keysyms[i]);
+	}
 
 	return 0;
 }
@@ -2087,7 +2139,7 @@ maximizenotify(struct wl_listener *listener, void *data)
 {
 	/* This event is raised when a client would like to maximize itself,
 	 * typically because the user clicked on the maximize button on
-	 * client-side decorations. swindle doesn't support maximization, but
+	 * client-side decorations. vindle doesn't support maximization, but
 	 * to conform to xdg-shell protocol we still must send a configure.
 	 * Since xdg-shell protocol v5 we should ignore request of unsupported
 	 * capabilities, just schedule a empty configure when the client uses <5
@@ -2188,36 +2240,6 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		resize(grabc, (struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y,
 			.width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1);
 		return;
-	} else if (cursor_mode == CurTileDrag) {
-		resize(grabc, (struct wlr_box){
-			.x = (int)round(cursor->x) - grabcx,
-			.y = (int)round(cursor->y) - grabcy,
-			.width = TILEDRAG_DETACH_W,
-			.height = TILEDRAG_DETACH_H,
-		}, 1);
-
-		/* tiled_client_at, not xytonode: grabc is on LyrFloat now and
-		 * covers whatever's under the cursor, so a scene hit-test would
-		 * just find grabc itself and stop. */
-		Client *target = tiled_client_at(cursor->x, cursor->y, grabc);
-
-		if (target) {
-			preselect_target = target;
-			preselect_edge = edge_at_point(target->geom, cursor->x, cursor->y);
-		} else {
-			preselect_target = NULL;
-			preselect_edge = EDGE_NONE;
-		}
-
-		if (preselect_target && preselect_edge != EDGE_NONE) {
-			struct wlr_box ind = preselect_indicator_box(preselect_target->geom, preselect_edge);
-			wlr_scene_node_set_position(&preselect_indicator->node, ind.x, ind.y);
-			wlr_scene_rect_set_size(preselect_indicator, ind.width, ind.height);
-			wlr_scene_node_set_enabled(&preselect_indicator->node, true);
-		} else {
-			wlr_scene_node_set_enabled(&preselect_indicator->node, false);
-		}
-		return;
 	}
 
 	/* If there's no client surface under the cursor, set the cursor image to a
@@ -2252,23 +2274,6 @@ moveresize(const Arg *arg)
 	xytonode(cursor->x, cursor->y, NULL, &grabc, NULL, NULL, NULL);
 	if (!grabc || client_is_unmanaged(grabc) || grabc->isfullscreen)
 		return;
-
-	if (arg->ui == CurMove && !grabc->isfloating
-			&& grabc->mon->lt[grabc->mon->sellt]->arrange) {
-		cursor_mode = CurTileDrag;
-		tiledrag_orig_geom = grabc->geom;
-		grabcx = TILEDRAG_DETACH_W / 2;
-		grabcy = TILEDRAG_DETACH_H / 2;
-		wlr_scene_node_reparent(&grabc->scene->node, layers[LyrFloat]);
-		resize(grabc, (struct wlr_box){
-			.x = (int)round(cursor->x) - grabcx,
-			.y = (int)round(cursor->y) - grabcy,
-			.width = TILEDRAG_DETACH_W,
-			.height = TILEDRAG_DETACH_H,
-		}, 1);
-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "grabbing");
-		return;
-	}
 
 	/* Float the window and tell motionnotify to grab it */
 	setfloating(grabc, 1);
@@ -2599,7 +2604,7 @@ run(char *startup_cmd)
 	}
 
 	/* Mark stdout as non-blocking as to avoid the startup script
-	 * causing swindle to freeze when a user neither closes stdin
+	 * causing vindle to freeze when a user neither closes stdin
 	 * nor consumes standard input in their startup script */
 
 	if (fd_set_nonblock(STDOUT_FILENO) < 0)
@@ -2842,12 +2847,6 @@ setup(void)
 	drag_icon = wlr_scene_tree_create(&scene->tree);
 	wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
 
-	{
-		static const float preselect_color[4] = {1.0f, 1.0f, 1.0f, 0.25f};
-		preselect_indicator = wlr_scene_rect_create(layers[LyrOverlay], 0, 0, preselect_color);
-		wlr_scene_node_set_enabled(&preselect_indicator->node, false);
-	}
-
 	/* Autocreates a renderer, either Pixman, GLES2 or Vulkan for us. The user
 	 * can also specify a renderer using the WLR_RENDERER env var.
 	 * The renderer is responsible for defining the various pixel formats it
@@ -3048,7 +3047,7 @@ spawn(const Arg *arg)
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
 		execvp(((char **)arg->v)[0], (char **)arg->v);
-		die("dwl: execvp %s failed:", ((char **)arg->v)[0]);
+		die("vindle: execvp %s failed:", ((char **)arg->v)[0]);
 	}
 }
 
@@ -3063,10 +3062,24 @@ startdrag(struct wl_listener *listener, void *data)
 	LISTEN_STATIC(&drag->icon->events.destroy, destroydragicon);
 }
 
+/* tag/view keys apply to the dragged window mid-drag. */
+static Client *
+dragtarget(void)
+{
+	if (grabc && (cursor_mode == CurMove || cursor_mode == CurResize))
+		return grabc;
+	return NULL;
+}
+
 void
 tag(const Arg *arg)
 {
-	Client *sel = focustop(selmon);
+	Client *sel;
+	if (!selmon)
+		return;
+	sel = dragtarget();
+	if (!sel)
+		sel = focustop(selmon);
 	if (!sel || (arg->ui & TAGMASK) == 0)
 		return;
 
@@ -3188,41 +3201,6 @@ dwindle_recalc(DwindleNode *n, int gap)
 	dwindle_recalc(n->children[1], gap);
 }
 
-static int
-dwindle_insert_at_edge(DwindleNode **root, Client *new_c, Client *target, DwindleEdge edge)
-{
-	DwindleNode *opening_on = dwindle_find_leaf(*root, target);
-	if (!opening_on)
-		return 0;
-
-	DwindleNode *new_leaf  = dwindle_new_node();
-	new_leaf->client  = new_c;
-	new_leaf->is_node = 0;
-
-	DwindleNode *new_parent = dwindle_new_node();
-	new_parent->is_node     = 1;
-	new_parent->box         = opening_on->box;
-	new_parent->parent      = opening_on->parent;
-
-	int new_c_first = (edge == EDGE_LEFT || edge == EDGE_TOP);
-	new_parent->split_top   = (edge == EDGE_TOP || edge == EDGE_BOTTOM);
-	new_parent->children[new_c_first ? 0 : 1] = new_leaf;
-	new_parent->children[new_c_first ? 1 : 0] = opening_on;
-
-	opening_on->parent = new_parent;
-	new_leaf->parent   = new_parent;
-
-	if (new_parent->parent) {
-		if (new_parent->parent->children[0] == opening_on)
-			new_parent->parent->children[0] = new_parent;
-		else
-			new_parent->parent->children[1] = new_parent;
-	} else {
-		*root = new_parent;
-	}
-	return 1;
-}
-
 /*
  * Insert new_c into the tree, bisecting the focused client's node
  * It falls back to the first leaf if focused is NULL or not in the tree
@@ -3327,44 +3305,6 @@ dwindle_remove_client(Client *c)
 			dwindle_remove(&m->dwindle_root[i], c, NULL);
 }
 
-#define PRESELECT_MARGIN 0.2
-
-static DwindleEdge
-edge_at_point(struct wlr_box box, double x, double y)
-{
-	double rel_x = (x - box.x) / MAX(1, box.width);
-	double rel_y = (y - box.y) / MAX(1, box.height);
-
-	/* Distance from each edge, in the same normalized 0..1 space. */
-	double d_left   = rel_x;
-	double d_right  = 1.0 - rel_x;
-	double d_top    = rel_y;
-	double d_bottom = 1.0 - rel_y;
-
-	double closest = MIN(MIN(d_left, d_right), MIN(d_top, d_bottom));
-	if (closest > PRESELECT_MARGIN)
-		return EDGE_NONE;
-
-	if (closest == d_left)   return EDGE_LEFT;
-	if (closest == d_right)  return EDGE_RIGHT;
-	if (closest == d_top)    return EDGE_TOP;
-	return EDGE_BOTTOM;
-}
-
-static struct wlr_box
-preselect_indicator_box(struct wlr_box target, DwindleEdge edge)
-{
-	struct wlr_box r = target;
-	switch (edge) {
-	case EDGE_LEFT:   r.width  /= 2; break;
-	case EDGE_RIGHT:  r.width  /= 2; r.x += target.width - r.width; break;
-	case EDGE_TOP:    r.height /= 2; break;
-	case EDGE_BOTTOM: r.height /= 2; r.y += target.height - r.height; break;
-	default: break; 
-	}
-	return r;
-}
-
 /* layout entry point */
 
 void
@@ -3372,10 +3312,9 @@ dwindle(Monitor *m)
 {
 	Client *c;
 	int n = 0, e;
-	Client *dragging = (cursor_mode == CurTileDrag) ? grabc : NULL;
 
 	wl_list_for_each(c, &clients, link)
-		if (c != dragging && VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen)
+		if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen)
 			n++;
 
 	if (n == 0)
@@ -3399,20 +3338,14 @@ dwindle(Monitor *m)
 			DwindleNode *nd = stack[--sp];
 			if (!nd->is_node) {
 				int found = 0;
-				if (nd->client == dragging) {
-					/* Treat the dragged client as "still present" so it
-					 * isn't pruned out from under itself mid-gesture. */
-					found = 1;
-				} else {
-					wl_list_for_each(c, &clients, link) {
-						if (c == nd->client
-								&& VISIBLEON(c, m)
-								&& !c->isfloating) {
-							found = 1;
-							break;
-						}
+				wl_list_for_each(c, &clients, link) {
+					if (c == nd->client
+							&& VISIBLEON(c, m)
+							&& !c->isfloating) {
+						found = 1;
+						break;
 					}
-				}
+				};
 				if (!found && sc < 512)
 					stale[sc++] = nd->client;
 			} else {
@@ -3433,7 +3366,7 @@ dwindle(Monitor *m)
 	Client *focused = m->dwindle_focus[ti];
 
 	wl_list_for_each(c, &clients, link) {
-		if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen || c == dragging)
+		if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
 			continue;
 		if (!dwindle_find_leaf(*root, c)) {
 			dwindle_insert(root, c, focused, NULL); /* TODO: wire to animation once that lands */
@@ -3542,66 +3475,6 @@ swapdir(const Arg *arg)
 	}
 
 	focusclient(sel, 1);
-	printstatus();
-}
-
-void
-swaptiled(Client *a, Client *b)
-{
-	Monitor *m;
-	if (!a || !b || a == b)
-		return;
-
-	wl_list_for_each(m, &mons, link) {
-		for (int i = 0; i < TAGCOUNT; i++) {
-			DwindleNode **root = &m->dwindle_root[i];
-			if (!*root)
-				continue;
-			DwindleNode *la = dwindle_find_leaf(*root, a);
-			DwindleNode *lb = dwindle_find_leaf(*root, b);
-			if (!la || !lb)
-				continue;
-			la->client = b;
-			lb->client = a;
-			int e = (m->gaps && cfg.appearance.gaps) ? (int)cfg.appearance.gaps : 0;
-			(*root)->box = (struct wlr_box){
-				m->w.x + e,
-				m->w.y + e,
-				MAX(1, m->w.width  - 2 * e),
-				MAX(1, m->w.height - 2 * e),
-			};
-			dwindle_recalc(*root, e);
-		}
-	}
-
-	focusclient(a, 1);
-	printstatus();
-}
-
-void
-dwindle_move_to_edge(Client *a, Client *b, DwindleEdge edge)
-{
-	if (!a || !b || a == b || edge == EDGE_NONE)
-		return;
-
-	DwindleNode **root = &b->mon->dwindle_root[current_tag_idx(b->mon)];
-	if (!dwindle_find_leaf(*root, a) || !dwindle_find_leaf(*root, b))
-		return;
-
-	dwindle_remove(root, a, NULL);
-	if (!dwindle_insert_at_edge(root, a, b, edge))
-		return; /* shouldn't happen (b was just confirmed present above) */
-
-	int e = (b->mon->gaps && cfg.appearance.gaps) ? (int)cfg.appearance.gaps : 0;
-	(*root)->box = (struct wlr_box){
-		b->mon->w.x + e,
-		b->mon->w.y + e,
-		MAX(1, b->mon->w.width  - 2 * e),
-		MAX(1, b->mon->w.height - 2 * e),
-	};
-	dwindle_recalc(*root, e);
-
-	focusclient(a, 1);
 	printstatus();
 }
 
@@ -3813,6 +3686,12 @@ view(const Arg *arg)
 {
 	if (!selmon || (arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
 		return;
+	/* Mid-drag tag/view takes the window along. */
+	if (arg->ui & TAGMASK) {
+		Client *drag = dragtarget();
+		if (drag)
+			drag->tags = arg->ui & TAGMASK;
+	}
 	selmon->seltags ^= 1; /* toggle sel tagset */
 	if (arg->ui & TAGMASK)
 		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
@@ -3851,24 +3730,6 @@ xytomon(double x, double y)
 {
 	struct wlr_output *o = wlr_output_layout_output_at(output_layout, x, y);
 	return o ? o->data : NULL;
-}
-
-static Client *
-tiled_client_at(double x, double y, Client *exclude)
-{
-	Client *c;
-	wl_list_for_each(c, &clients, link) {
-		if (c == exclude || c->isfloating || c->isfullscreen)
-			continue;
-		if (!c->mon || !VISIBLEON(c, c->mon))
-			continue;
-		if (c->mon->lt[c->mon->sellt]->arrange != dwindle)
-			continue;
-		if (x >= c->geom.x && x < c->geom.x + c->geom.width
-				&& y >= c->geom.y && y < c->geom.y + c->geom.height)
-			return c;
-	}
-	return NULL;
 }
 
 void
@@ -4009,7 +3870,7 @@ xwaylandready(struct wl_listener *listener, void *data)
 	/* assign the one and only seat */
 	wlr_xwayland_set_seat(xwayland, seat);
 
-	/* Set the default XWayland cursor to match the rest of swindle. */
+	/* Set the default XWayland cursor to match the rest of vindle. */
 	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default", 1))) {
 		image = xcursor->images[0];
 		wlr_xwayland_set_cursor(xwayland,
@@ -4049,7 +3910,7 @@ main(int argc, char *argv[])
 			cfg.log_level = WLR_DEBUG; /* override before setup() */
 			break;
 		case 'v':
-			die("swindle " VERSION);
+			die("vindle " VERSION);
 		default:
 			goto usage;
 		}
