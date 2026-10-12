@@ -1,0 +1,265 @@
+.TH VINDLE 1 "2026-10-12" "vindle\-VERSION"
+.SH NAME
+vindle \- minimal tiling Wayland compositor
+.SH SYNOPSIS
+.B vindle
+.RB [ \-v ]
+.RB [ \-d ]
+.RB [ \-s
+.IR "startup command" ]
+.RB [ \-c
+.IR "config file" ]
+.SH DESCRIPTION
+vindle is a minimal tiling Wayland compositor on wlroots. It is a fork of
+swindle (itself a fork of dwl) with a comfortable standard keymap,
+.B us,ru
+keyboard layouts out of the box, and a double border. Its goal is plain
+window and input management: one tiling layout (dwindle) plus floating,
+tags as a bitmask, predictable focus. It draws no bar, no widgets, no
+wallpaper, no animations. External programs cover the rest: foot or
+another terminal, fuzzel or another launcher, waybar or another bar,
+swaybg or another wallpaper tool.
+.P
+vindle is configured with a Lua file. The chain is
+.IR example/config.lua
+shipped in the repository, installed as
+.IR /etc/vindle/config.lua ,
+overridden by
+.IR ~/.config/vindle/config.lua .
+The running compositor watches the active file with inotify and
+reloads it on save; input options (repeat rate, libinput settings,
+keyboard layout) still require a restart. Unknown keys produce a warning
+on standard error but do not stop the session.
+.P
+The companion tool
+.B smsg
+speaks the frozen dwl-ipc protocol to query and drive the compositor
+(tags, layouts, focused client).
+.SH OPTIONS
+.TP
+.BI \-c " config file"
+Load the given Lua config instead of the default chain. The path must be
+a readable regular file; a missing path exits with a clear error.
+.TP
+.BI \-s " startup command"
+Run a shell command once the Wayland socket is live. Standard output of
+the compositor is piped to the standard input of the command, so the
+compositor never blocks on an unconsumed pipe.
+.TP
+.B \-d
+Debug logging. Overrides the
+.B log_level
+config value.
+.TP
+.B \-v
+Print version information and exit.
+.P
+Any other argument prints a usage message to standard error and exits.
+.P
+The environment variable
+.B XDG_RUNTIME_DIR
+must be set; Wayland needs it for the communication socket.
+.SH CONFIGURATION
+Copy
+.IR /etc/vindle/config.lua
+to
+.IR ~/.config/vindle/config.lua
+before the first start and edit the copy. Colors are 0xRRGGBBAA numbers.
+.SS Top level
+.TP
+.B sloppy_focus
+Focus follows the pointer (default true).
+.TP
+.B bypass_surface_visibility
+Idle inhibitor accounting ignores surface visibility (default false).
+.TP
+.B log_level
+One of silent, error, info, debug (default error).
+.SS appearance
+Double border, always drawn as two rings through scene rectangles.
+.TP
+.B inner_border_px , outer_border_px
+Ring widths in pixels (default 1+1).
+.TP
+.B gaps
+Inner gap between tiled windows (default 10 in code, 6 shipped).
+.TP
+.B smart_gaps
+No gaps with a single tiled window (default false).
+.TP
+.B root_color , fullscreen_bg
+Background colors.
+.TP
+.B inner_border_color , outer_border_color
+Unfocused window colors.
+.TP
+.B inner_focus_color , outer_focus_color
+Focused window colors.
+.TP
+.B inner_urgent_color , outer_urgent_color
+Urgent window colors.
+.SS input
+.TP
+.B repeat_rate , repeat_delay
+Key repeat rate and delay. Applied at startup only.
+.TP
+.B tap_to_click , tap_and_drag , drag_lock , natural_scrolling , disable_while_typing , left_handed , middle_button_emulation , accel_speed , tap_button_map
+libinput device options. Applied at startup only.
+.TP
+.B scroll_method
+2fg, edge or button.
+.TP
+.B click_method
+button_areas or clickfinger.
+.TP
+.B send_events_mode
+enabled, disabled or disabled_on_external.
+.TP
+.B accel_profile
+adaptive or flat.
+.TP
+.B layout , variant , options
+XKB setup, for example
+.B layout = "us,ru"
+with
+.B options = "grp:alt_shift_toggle" .
+The first layout is active at startup. Keybinds stay working in every
+layout: binds are matched against the pressed keysym, then the unshifted
+level, then level zero of the other layouts. Applied at startup only.
+.SS rules
+Array of window rules with keys
+.BR app_id ,
+.BR title ,
+.BR tags ,
+.BR floating ,
+.BR monitor .
+Empty
+.B app_id
+or
+.B title
+matches anything.
+.B monitor
+\-1 means current.
+.SS monitors
+Array of output rules, first match wins. Keys:
+.BR name ,
+.BR mfact ,
+.BR nmaster ,
+.BR scale ,
+.BR layout ,
+.BR transform ,
+.BR x ,
+.B y.
+Empty
+.B name
+matches any output.
+.B mfact
+is the first child share of every dwindle split (0.5 splits evenly).
+.B nmaster
+is accepted but reserved by the dwindle layout.
+.B layout
+is dwindle or floating.
+.BR x ,
+.B y
+\-1 always means automatic placement.
+.SS keybinds
+Array of
+.BR mods ,
+.BR key ,
+.BR action ,
+.BR args .
+Mods are shift, ctrl, alt, logo, mod2, mod3, mod5. Key is an XKB keysym
+name such as Return, d, F11. Unknown keys skip the bind with a warning.
+.SS buttons
+Array of
+.BR mods ,
+.BR button ,
+.BR action ,
+.BR args .
+Button is left, middle, right or a Linux event code number.
+.SS autostart
+Plain shell commands run in order once the socket is live, each in its
+own child. There is no service supervision and no systemd support.
+.SH DEFAULT KEYS
+Modifier is the logo key.
+.TP
+.B logo+Return, logo+d
+Spawn foot, spawn fuzzel.
+.TP
+.B logo+q, logo+Shift+e
+Close client, quit the compositor.
+.TP
+.B logo+h, logo+j, logo+k, logo+l
+Focus left, down, up, right.
+.TP
+.B logo+Tab
+Toggle to the previously viewed tag set.
+.TP
+.B logo+t, logo+f
+Dwindle layout, floating layout.
+.TP
+.B logo+F11
+Toggle fullscreen.
+.TP
+.B logo+Shift+space
+Toggle floating.
+.TP
+.B logo+0, logo+Shift+0
+View all tags, send client to all tags.
+.TP
+.B logo+g
+Toggle gaps.
+.TP
+.B logo+Shift+H, logo+Shift+J, logo+Shift+K, logo+Shift+L
+Swap with the neighbor left, down, up, right.
+.TP
+.B logo+comma, logo+period
+Focus monitor left, right.
+.TP
+.B logo+Shift+less, logo+Shift+greater
+Send client to monitor left, right.
+.TP
+.B logo+1..9
+View tag. With ctrl toggles the view, with shift moves the client,
+with ctrl+shift toggles the client tag.
+.SH MOUSE
+.TP
+.B logo+Left
+Move window. A tiled window becomes floating in place at its current
+size; dropping it keeps the drop geometry.
+.TP
+.B logo+Middle
+Toggle floating.
+.TP
+.B logo+Right
+Resize window.
+.P
+Holding a tag or view key mid drag carries the dragged window to that
+tag.
+.SH TAGS
+Nine tags as a bitmask. A window is visible when its tags and the
+current view share at least one bit, so one window can sit on several
+tags and several tags can be viewed at once.
+.SH FILES
+.TP
+.I /etc/vindle/config.lua
+Shipped default, overwritten on reinstall.
+.TP
+.I ~/.config/vindle/config.lua
+User config, watched and hot reloaded.
+.SH EXAMPLES
+.RS
+.EX
+cp /etc/vindle/config.lua ~/.config/vindle/config.lua
+vindle
+WLR_BACKENDS=headless vindle \-c ./example/config.lua
+.EE
+.RE
+.SH SEE ALSO
+.BR foot (1),
+.BR fuzzel (1),
+.BR waybar (1),
+.BR swaybg (1)
+.SH BUGS
+No known crashers in normal work. Report issues upstream with the
+version string, the config file and the headless log.

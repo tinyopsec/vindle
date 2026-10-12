@@ -1,9 +1,11 @@
-vindle - wayland compositor (swindle/dwl fork, nwm keymaps)
+vindle - wayland compositor (swindle/dwl fork)
 
 Copyright © 2026 kantiankant
+Copyright © 2026 tinyopsec
 
 See also the files licenses/LICENSE.dwl, licenses/LICENSE.tinywl, 
-licenses/LICENSE.dwm, licenses/LICENSE.sway, and licenses/LICENSE.mangowm
+licenses/LICENSE.dwm, licenses/LICENSE.sway, licenses/LICENSE.mangowm,
+licenses/LICENSE.dwlmsg, and licenses/LICENSE.wlroots
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by

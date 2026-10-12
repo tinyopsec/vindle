@@ -201,7 +201,6 @@ struct DwindleNode {
 	DwindleNode   *parent;
 	Client        *client;     
 	struct wlr_box box;
-	float          split_ratio;
 	int            split_top; 
 	int            is_node;  
 };
@@ -2723,8 +2722,6 @@ setlayout(const Arg *arg)
 	printstatus();
 }
 
-/* arg > 1.0 will set mfact absolutely */
-
 void
 setmon(Client *c, Monitor *m, uint32_t newtags)
 {
@@ -2778,8 +2775,21 @@ on_config_reload(const Config *newcfg, void *ud)
 	Monitor *m;
 	(void)ud;
 	cfg = *newcfg;
-	wl_list_for_each(m, &mons, link)
+	wl_list_for_each(m, &mons, link) {
+		/* Re-apply monitor rule fields that arrange reads live.
+		 * Same match as createmon: first rule with empty name or
+		 * substring of the output name. Gaps stay runtime state
+		 * (Mod+g toggles them; reload must not clobber the toggle). */
+		for (int ri = 0; ri < cfg.nmonitors; ri++) {
+			const CfgMonitorRule *r = &cfg.monitors[ri];
+			if (!r->name[0] || strstr(m->wlr_output->name, r->name)) {
+				m->mfact = r->mfact;
+				m->nmaster = r->nmaster;
+				break;
+			}
+		}
 		arrange(m);
+	}
 	printstatus();
 }
 
@@ -3118,11 +3128,23 @@ current_tag_idx(Monitor *m)
 	return idx < TAGCOUNT ? idx : 0;
 }
 
+/* Split ratio from the monitor mfact, clamped like dwm.
+ * mfact 0.5 yields 1.0, i.e. byte-identical geometry to before H1. */
+static float
+dwindle_ratio(Monitor *m)
+{
+	float r = m->mfact * 2.0f;
+	if (r < 0.1f)
+		r = 0.1f;
+	if (r > 1.9f)
+		r = 1.9f;
+	return r;
+}
+
 static DwindleNode *
 dwindle_new_node(void)
 {
 	DwindleNode *n = ecalloc(1, sizeof(*n));
-	n->split_ratio = 1.0f;
 	return n;
 }
 
@@ -3160,10 +3182,12 @@ dwindle_first_leaf(DwindleNode *n)
 /*
  * Recursively distribute geometry downward from node n
  * gap is inner gap pixels between the two halves
+ * ratio is the first-child share doubled: 1.0 splits evenly,
+ * 2*mfact honors the monitor mfact (0.5 keeps old geometry)
  */
 
 static void
-dwindle_recalc(DwindleNode *n, int gap)
+dwindle_recalc(DwindleNode *n, int gap, float ratio)
 {
 	if (!n)
 		return;
@@ -3178,7 +3202,7 @@ dwindle_recalc(DwindleNode *n, int gap)
 	n->split_top = (n->box.height > n->box.width);
 
 	if (!n->split_top) {
-		int w1 = MAX(1, (int)(n->box.width / 2.0f * n->split_ratio) - gap / 2);
+		int w1 = MAX(1, (int)(n->box.width / 2.0f * ratio) - gap / 2);
 		n->children[0]->box = (struct wlr_box){
 			n->box.x, n->box.y, w1, n->box.height
 		};
@@ -3187,7 +3211,7 @@ dwindle_recalc(DwindleNode *n, int gap)
 			MAX(1, n->box.width - w1 - gap), n->box.height
 		};
 	} else {
-		int h1 = MAX(1, (int)(n->box.height / 2.0f * n->split_ratio) - gap / 2);
+		int h1 = MAX(1, (int)(n->box.height / 2.0f * ratio) - gap / 2);
 		n->children[0]->box = (struct wlr_box){
 			n->box.x, n->box.y, n->box.width, h1
 		};
@@ -3197,8 +3221,8 @@ dwindle_recalc(DwindleNode *n, int gap)
 		};
 	}
 
-	dwindle_recalc(n->children[0], gap);
-	dwindle_recalc(n->children[1], gap);
+	dwindle_recalc(n->children[0], gap, ratio);
+	dwindle_recalc(n->children[1], gap, ratio);
 }
 
 /*
@@ -3382,7 +3406,7 @@ dwindle(Monitor *m)
 			MAX(1, m->w.width  - 2 * e),
 			MAX(1, m->w.height - 2 * e),
 		};
-		dwindle_recalc(*root, e);
+		dwindle_recalc(*root, e, dwindle_ratio(m));
 	}
 }
 
@@ -3465,7 +3489,7 @@ swapdir(const Arg *arg)
 					MAX(1, selmon->w.width  - 2 * e),
 					MAX(1, selmon->w.height - 2 * e),
 				};
-				dwindle_recalc(*root, e);
+				dwindle_recalc(*root, e, dwindle_ratio(selmon));
 			}
 		}
 	} else {

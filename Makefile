@@ -88,10 +88,14 @@ install: vindle smsg/smsg
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/smsg
 	mkdir -p $(DESTDIR)/etc/vindle
 	cp -r example/* $(DESTDIR)/etc/vindle
+	mkdir -p $(DESTDIR)$(MANDIR)/man1
+	cp -f vindle.1 $(DESTDIR)$(MANDIR)/man1
+	chmod 644 $(DESTDIR)$(MANDIR)/man1/vindle.1
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/vindle
 	rm -f $(DESTDIR)$(PREFIX)/bin/smsg
+	rm -f $(DESTDIR)$(MANDIR)/man1/vindle.1
 	rm -rf $(DESTDIR)/etc/vindle
 
 .SUFFIXES: .c .o

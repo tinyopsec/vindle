@@ -6,7 +6,7 @@ appearance = {
     -- Inner + outer border, both always drawn. Neutral default.
     inner_border_px   = 1,
     outer_border_px   = 1,
-    gaps         = 6,      -- nwm gappx = 6. 0 = no gaps.
+    gaps         = 6,      -- space between windows. 0 = no gaps.
     smart_gaps   = false,
 
     root_color   = 0x222222ff,
@@ -45,7 +45,7 @@ input = {
 }
 
 rules = {
-    -- nwm.h: { "Gimp", NULL, NULL, 0, 1 }, { "MPlayer", NULL, NULL, 0, 1 }
+    -- float these two by default
     { app_id = "Gimp",    floating = true,  monitor = -1 },
     { app_id = "MPlayer", floating = true,  monitor = -1 },
 --   { app_id = "firefox", tags = 1 << 8,    floating = false, monitor = -1 },
@@ -53,7 +53,7 @@ rules = {
 
 monitors = {
     -- catch-all rule; name = nil means match anything
-    -- nwm.h: mfact = 0.5, nmaster = 1
+    -- mfact 0.5 splits evenly, nmaster is reserved by dwindle
     { name = nil, mfact = 0.5, nmaster = 1, scale = 1.0,
       layout = "dwindle", x = -1, y = -1 },
 
@@ -70,7 +70,7 @@ autostart = {
 }
 
 
--- Keymaps follow nwm (MODKEY = logo).
+-- Comfortable keymap, MODKEY = logo.
 -- foot replaces st, fuzzel replaces dmenu_run (Wayland-native).
 -- hjkl moves focus (no master-stack here); t = tile, f = float.
 keybinds = {
@@ -93,7 +93,7 @@ keybinds = {
     { mods = {"logo"},          key = "0",      action = "view",      args = {"all"} },
     { mods = {"logo", "shift"}, key = "0",      action = "tag",       args = {"511"} },
 
-    -- extras (multi-monitor/dwindle, no nwm equivalent):
+    -- extras (multi-monitor/dwindle):
     { mods = {"logo"},          key = "g",      action = "togglegaps" },
     { mods = {"logo", "shift"}, key = "H",      action = "swapdir",   args = {"left"} },
     { mods = {"logo", "shift"}, key = "J",      action = "swapdir",   args = {"down"} },
