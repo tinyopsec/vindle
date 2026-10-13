@@ -65,7 +65,7 @@ vindle
 
 ## What vindle is
 
-vindle manages windows and input on Wayland and nothing else. One tiling layout (dwindle) plus floating, 9 tags as a bitmask, predictable focus, a double border. No bar, no widgets, no wallpaper, no animations, no themes. External programs cover the rest: foot, fuzzel, waybar, swaybg.
+vindle manages windows and input on Wayland and nothing else. One tiling layout (dwindle) plus floating, 9 tags as a bitmask, predictable focus, a double border inherited from the swindle lineage and kept. No bar, no widgets, no wallpaper, no animations, no themes. External programs cover the rest: foot, fuzzel, waybar, swaybg.
 
 It is written to be read. About 7700 lines of C, headers and Lua in total, the compositor itself about 3900. If you spare an evening you will know where everything lives.
 
@@ -76,8 +76,7 @@ It is written to be read. About 7700 lines of C, headers and Lua in total, the c
 Everything below is user visible, no refactors for beauty:
 
 - Comfortable standard keymap (hjkl focus, t tile, f float, g gaps)
-- `us,ru` keyboard layouts out of the box with Alt+Shift toggle, binds work in every layout
-- Double border (inner plus outer ring) instead of a single one
+- `us` first and `ru` second out of the box with Alt+Shift toggle (I am Kazakh, Russian is near native, Latin must work on first boot); one line in `input.layout` changes the order, binds work in every layout
 - Dwindle honors the monitor `mfact` instead of always splitting evenly
 - Mouse drag floats a tiled window in place and carries it across tags
 - Unknown config keys print a warning instead of failing silently
@@ -102,7 +101,7 @@ Everything below is user visible, no refactors for beauty:
 | Dialogs | Dialog windows and fixed size windows float automatically |
 | Layer shell | Bars and panels reserve space; tiling avoids it |
 | XWayland | Optional at build time (`XWAYLAND` in `config.mk`) |
-| Keyboard | `us,ru` with Alt+Shift toggle; layout independent binds with key repeat |
+| Keyboard | `us` first, `ru` second with Alt+Shift toggle (my native pair, changeable in one line); layout independent binds with key repeat |
 | Hot reload | Config watcher reapplies values on save; input options still need a restart |
 | IPC | Frozen dwl-ipc surface plus `smsg` client tool |
 | Compilation | Zero warnings under `-std=c11 -Wall -Wextra` |
