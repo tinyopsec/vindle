@@ -3,17 +3,17 @@ bypass_surface_visibility  = false
 log_level                  = "error"  -- "silent", "error", "info", "debug"
 
 appearance = {
-    -- Inner + outer border, both always drawn. Neutral default.
-    inner_border_px   = 1,
-    outer_border_px   = 1,
+    -- Inner + outer border, both always drawn.
+    inner_border_px   = 2,
+    outer_border_px   = 3,
     gaps         = 6,      -- space between windows. 0 = no gaps.
     smart_gaps   = false,
 
     root_color   = 0x222222ff,
-    inner_border_color = 0x999999ff,
-    outer_border_color = 0x000000ff,
+    inner_border_color = 0xffffffff,
+    outer_border_color = 0x242424ff,
     inner_focus_color  = 0xffffffff,
-    outer_focus_color  = 0x999999ff,
+    outer_focus_color  = 0x242424ff,
     inner_urgent_color = 0xff0000ff,
     outer_urgent_color = 0xff0000ff,
 

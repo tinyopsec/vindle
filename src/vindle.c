@@ -74,6 +74,10 @@
 #include "util.h"
 #include "parser/parser.h"
 
+#ifndef VINDLE_ETCDIR
+#define VINDLE_ETCDIR "/etc/vindle"
+#endif
+
 /* macros */
 #define MAX(A, B)               ((A) > (B) ? (A) : (B))
 #define MIN(A, B)               ((A) < (B) ? (A) : (B))
@@ -2580,7 +2584,7 @@ run(char *startup_cmd)
 	/* Start the backend. This will enumerate outputs and inputs, become the DRM
 	 * master, etc */
 	if (!wlr_backend_start(backend))
-		die("startup: backend_start");
+		die("startup: backend_start (check seat access, DRM device, video group)");
 
 	/* Now that the socket exists and the backend is started, run the startup command */
 	if (startup_cmd) {
@@ -2793,6 +2797,22 @@ on_config_reload(const Config *newcfg, void *ud)
 	printstatus();
 }
 
+/* Config search order: explicit path, user file, installed default.
+ * The returned pointer stays valid only while both buffers live. */
+static const char *
+resolve_cfg_path(char *userbuf, size_t userlen, char *etcbuf, size_t etclen)
+{
+	struct stat st;
+
+	if (custom_cfg_path)
+		return custom_cfg_path;
+	config_get_path(userbuf, userlen);
+	if (stat(userbuf, &st) == 0)
+		return userbuf;
+	snprintf(etcbuf, etclen, "%s/config.lua", VINDLE_ETCDIR);
+	return etcbuf;
+}
+
 void
 setup(void)
 {
@@ -2806,16 +2826,16 @@ setup(void)
 	/* Load config before anything else so all settings are ready */
 	{
 		char cfgpath[1024];
-		const char *path;
+		char etcpath[1024];
+		const char *path = resolve_cfg_path(cfgpath, sizeof(cfgpath),
+		                                    etcpath, sizeof(etcpath));
 		int debug_override = (cfg.log_level == WLR_DEBUG); /* set by -d flag in main() */
-		if (custom_cfg_path)
-			path = custom_cfg_path;
-		else {
-			config_get_path(cfgpath, sizeof(cfgpath));
-			path = cfgpath;
-		}
-		if (config_load(path, &cfg) < 0)
+		if (config_load(path, &cfg) < 0) {
+			if (!custom_cfg_path)
+				fprintf(stderr, "vindle: copy '%s' to '%s' and edit the copy\n",
+				        path, cfgpath);
 			die("failed to load config from '%s'", path);
+		}
 		if (debug_override)
 			cfg.log_level = WLR_DEBUG;
 	}
@@ -2833,11 +2853,9 @@ setup(void)
 
 	{
 		char cfgpath[1024];
-		const char *path = custom_cfg_path;
-		if (!path) {
-			config_get_path(cfgpath, sizeof(cfgpath));
-			path = cfgpath;
-		}
+		char etcpath[1024];
+		const char *path = resolve_cfg_path(cfgpath, sizeof(cfgpath),
+		                                    etcpath, sizeof(etcpath));
 		cfg_watch_src = config_watch_start(event_loop, path,
 		                                    on_config_reload, NULL);
 	}

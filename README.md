@@ -143,6 +143,17 @@ sudo make install   # installs to /usr/local/bin/vindle, config to /etc/vindle, 
 
 Change `PREFIX` in `config.mk` to install elsewhere. To stage the install (packaging), use `make DESTDIR=/tmp/stage install`. Downstream packaging is out of scope for this repo on purpose: the portable `Makefile` covers all targets.
 
+### BSD notes (best effort, community tested)
+
+Linux is the first class target. BSD builds on a best effort basis with no promises.
+
+```sh
+gmake LUA_PKG=lua-5.4
+sudo gmake ETCDIR=/usr/local/etc/vindle install
+```
+
+Start from a TTY, not from inside X11 (unset `DISPLAY` or set `WLR_BACKENDS` to pick the DRM backend). Seat access is required: enable `seatd`, join the `video` group. If no user config exists, the installed default is used directly.
+
 ### Uninstall
 
 ```sh

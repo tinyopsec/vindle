@@ -7,6 +7,9 @@ PKG_CONFIG = pkg-config
 PREFIX = /usr/local
 MANDIR = $(PREFIX)/share/man
 DATDIR = $(PREFIX)/share
+# Installed default config dir, used when the user config is missing.
+# FreeBSD ports hierarchy: make ETCDIR=/usr/local/etc/vindle
+ETCDIR = /etc/vindle
 
 WLR_INCS = `$(PKG_CONFIG) --cflags wlroots-0.20`
 WLR_LIBS = `$(PKG_CONFIG) --libs wlroots-0.20`
@@ -22,8 +25,9 @@ WLR_LIBS = `$(PKG_CONFIG) --libs wlroots-0.20`
 XWAYLAND = -DXWAYLAND
 XLIBS = xcb xcb-icccm
 
-# lua
-LUA_PKG = lua5.4
+# lua (pkg-config name differs by platform)
+# FreeBSD: make LUA_PKG=lua-5.4
+LUA_PKG ?= lua5.4
 
 PKGS      = wayland-server xkbcommon libinput $(LUA_PKG) $(XLIBS)
 

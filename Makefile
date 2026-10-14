@@ -5,6 +5,7 @@ include config.mk
 
 VINDLECFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) \
 	-I. -Iinclude -Isrc -Iparser -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L -DVERSION=\"$(VERSION)\" \
+	-DVINDLE_ETCDIR=\"$(ETCDIR)\" \
 	$(XWAYLAND) -g -Wall -Wextra -Wno-unused-parameter -O1 -std=c11 $(CFLAGS)
 LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm $(LIBS)
 
@@ -86,8 +87,8 @@ install: vindle smsg/smsg
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/vindle
 	cp -f smsg/smsg $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/smsg
-	mkdir -p $(DESTDIR)/etc/vindle
-	cp -r example/* $(DESTDIR)/etc/vindle
+	mkdir -p $(DESTDIR)$(ETCDIR)
+	cp -r example/* $(DESTDIR)$(ETCDIR)
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
 	cp -f vindle.1 $(DESTDIR)$(MANDIR)/man1
 	chmod 644 $(DESTDIR)$(MANDIR)/man1/vindle.1
@@ -96,7 +97,7 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/vindle
 	rm -f $(DESTDIR)$(PREFIX)/bin/smsg
 	rm -f $(DESTDIR)$(MANDIR)/man1/vindle.1
-	rm -rf $(DESTDIR)/etc/vindle
+	rm -rf $(DESTDIR)$(ETCDIR)
 
 .SUFFIXES: .c .o
 .c.o:

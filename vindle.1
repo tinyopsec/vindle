@@ -79,7 +79,7 @@ One of silent, error, info, debug (default error).
 Double border, always drawn as two rings through scene rectangles.
 .TP
 .B inner_border_px , outer_border_px
-Ring widths in pixels (default 1+1).
+Ring widths in pixels (default 2+3).
 .TP
 .B gaps
 Inner gap between tiled windows (default 10 in code, 6 shipped).
@@ -246,7 +246,8 @@ tags and several tags can be viewed at once.
 Shipped default, overwritten on reinstall.
 .TP
 .I ~/.config/vindle/config.lua
-User config, watched and hot reloaded.
+User config, watched and hot reloaded. If missing, the shipped
+default is used directly.
 .SH EXAMPLES
 .RS
 .EX

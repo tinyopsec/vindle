@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#ifdef __FreeBSD__
+#include <sys/un.h>
+#include <sys/ucred.h>
+#endif
 #include <wayland-client.h>
 #include <wayland-util.h>
 #include "dwl-ipc-unstable-v2-protocol.h"
@@ -486,11 +490,19 @@ main(int argc, char *argv[])
 
 	if (Pflag) {
 		int fd = wl_display_get_fd(display);
+#ifdef __FreeBSD__
+		struct xucred xucred;
+		socklen_t len = sizeof(xucred);
+		if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, &xucred, &len) == -1)
+			die("bad getsockopt");
+		printf("%d\n", xucred.cr_pid);
+#else
 		struct ucred ucred;
 		socklen_t len = sizeof(struct ucred);
 		if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &ucred, &len) == -1)
 			die("bad getsockopt");
 		printf("%d\n", ucred.pid);
+#endif
 	}
 
 	registry = wl_display_get_registry(display);
