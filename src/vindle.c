@@ -1725,14 +1725,12 @@ inputdevice(struct wl_listener *listener, void *data)
 		createpointer(wlr_pointer_from_input_device(device));
 		break;
 	default:
-		/* TODO handle other input device types */
 		break;
 	}
 
 	/* We need to let the wlr_seat know what our capabilities are, which is
 	 * communiciated to the client. In dwl we always have a cursor, even if
 	 * there are no pointer devices, so we always include that capability. */
-	/* TODO do we actually require a cursor? */
 	caps = WL_SEAT_CAPABILITY_POINTER;
 	if (!wl_list_empty(&kb_group->wlr_group->devices))
 		caps |= WL_SEAT_CAPABILITY_KEYBOARD;
@@ -3071,12 +3069,24 @@ setup(void)
 void
 spawn(const Arg *arg)
 {
-	if (fork() == 0) {
-		dup2(STDERR_FILENO, STDOUT_FILENO);
+	pid_t pid = fork();
+	if (pid == 0) {
+		int fd, maxfd;
 		setsid();
+		/* Drop inherited signal handlers and stray descriptors. */
+		for (fd = 1; fd < 64; fd++)
+			signal(fd, SIG_DFL);
+		maxfd = (int)sysconf(_SC_OPEN_MAX);
+		if (maxfd < 0)
+			maxfd = 1024;
+		for (fd = 3; fd < maxfd; fd++)
+			close(fd);
+		dup2(STDERR_FILENO, STDOUT_FILENO);
 		execvp(((char **)arg->v)[0], (char **)arg->v);
 		die("vindle: execvp %s failed:", ((char **)arg->v)[0]);
 	}
+	if (pid < 0)
+		perror("vindle: fork");
 }
 
 void
@@ -3397,7 +3407,7 @@ dwindle(Monitor *m)
 		}
 
 		for (int i = 0; i < sc; i++)
-			dwindle_remove(root, stale[i], NULL); /* TODO: wire to animation (soon tm) */
+			dwindle_remove(root, stale[i], NULL);
 	}
 
 	/* insert any newly visible client, splitting the focused node.
@@ -3411,7 +3421,7 @@ dwindle(Monitor *m)
 		if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
 			continue;
 		if (!dwindle_find_leaf(*root, c)) {
-			dwindle_insert(root, c, focused, NULL); /* TODO: wire to animation once that lands */
+			dwindle_insert(root, c, focused, NULL);
 			focused = c;
 		}
 	}

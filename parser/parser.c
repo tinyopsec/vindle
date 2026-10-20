@@ -858,6 +858,9 @@ config_watch_start(struct wl_event_loop *loop, const char *path,
 
 	ws->event_src = src;
 	fprintf(stderr, "vindle config: watching '%s'\n", path);
+	/* WatchState owns the real wl_event_source (ws->event_src);
+	 * the cast keeps the public ABI as wl_event_source * without
+	 * exposing WatchState. config_watch_stop casts back. */
 	return (struct wl_event_source *)ws;
 }
 
