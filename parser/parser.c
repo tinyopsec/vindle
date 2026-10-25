@@ -190,10 +190,28 @@ static const char *const button_keys[] = {
 	"mods", "button", "action", "args",
 };
 
+static const char *const animations_keys[] = {
+	"enabled", "duration_move", "duration_open", "duration_close",
+	"duration_tag", "open_type", "close_type", "tag_slide",
+	"fade_in", "fade_out", "curve",
+};
+
+static int
+parse_anim_type(lua_State *L, const char *key, int def)
+{
+	char scratch[CFG_MAX_STRLEN] = {0};
+	lua_get_string(L, key, scratch, sizeof(scratch));
+	if      (!strcmp(scratch, "none"))  return CFG_ANIM_NONE;
+	else if (!strcmp(scratch, "slide")) return CFG_ANIM_SLIDE;
+	else if (!strcmp(scratch, "zoom"))  return CFG_ANIM_ZOOM;
+	else if (!strcmp(scratch, "fade"))  return CFG_ANIM_FADE;
+	return def;
+}
+
 static const char *const toplevel_keys[] = {
 	"sloppy_focus", "bypass_surface_visibility", "log_level",
 	"appearance", "input", "rules", "monitors",
-	"keybinds", "buttons", "autostart",
+	"keybinds", "buttons", "autostart", "animations",
 };
 
 /* __newindex guard on _G: warns on unknown top-level keys at assignment
@@ -583,6 +601,63 @@ parse_autostart(lua_State *L, Config *cfg)
 	lua_pop(L, 1);
 }
 
+static void
+parse_animations(lua_State *L, CfgAnimations *a)
+{
+	/* Fast, calm defaults when the section is absent. */
+	a->enabled        = 1;
+	a->duration_move  = 260;
+	a->duration_open  = 220;
+	a->duration_close = 220;
+	a->duration_tag   = 220;
+	a->open_type      = CFG_ANIM_SLIDE;
+	a->close_type     = CFG_ANIM_SLIDE;
+	a->tag_vertical   = 0;
+	a->fade_in        = 1;
+	a->fade_out       = 1;
+	a->curve[0] = 0.46f; a->curve[1] = 1.0f;
+	a->curve[2] = 0.29f; a->curve[3] = 0.99f;
+
+	lua_getglobal(L, "animations");
+	if (!lua_istable(L, -1)) {
+		lua_pop(L, 1);
+		return;
+	}
+
+	a->enabled        = lua_get_bool(L, "enabled", a->enabled);
+	a->duration_move  = lua_get_int (L, "duration_move",  a->duration_move);
+	a->duration_open  = lua_get_int (L, "duration_open",  a->duration_open);
+	a->duration_close = lua_get_int (L, "duration_close", a->duration_close);
+	a->duration_tag   = lua_get_int (L, "duration_tag",   a->duration_tag);
+	a->open_type      = parse_anim_type(L, "open_type",  a->open_type);
+	a->close_type     = parse_anim_type(L, "close_type", a->close_type);
+	a->fade_in        = lua_get_bool(L, "fade_in",  a->fade_in);
+	a->fade_out       = lua_get_bool(L, "fade_out", a->fade_out);
+
+	char scratch[CFG_MAX_STRLEN] = {0};
+	lua_get_string(L, "tag_slide", scratch, sizeof(scratch));
+	if      (!strcmp(scratch, "vertical"))   a->tag_vertical = 1;
+	else if (!strcmp(scratch, "horizontal")) a->tag_vertical = 0;
+
+	lua_getfield(L, -1, "curve");
+	if (lua_istable(L, -1)) {
+		int n = (int)lua_rawlen(L, -1);
+		if (n > 4)
+			n = 4;
+		for (int i = 0; i < n; i++) {
+			lua_rawgeti(L, -1, i + 1);
+			if (lua_isnumber(L, -1))
+				a->curve[i] = (float)lua_tonumber(L, -1);
+			lua_pop(L, 1);
+		}
+	}
+	lua_pop(L, 1);
+
+	warn_unknown_keys(L, "animations", animations_keys,
+	                  sizeof(animations_keys) / sizeof(animations_keys[0]));
+	lua_pop(L, 1);
+}
+
 /* Public API */
 
 char *
@@ -656,6 +731,7 @@ config_load(const char *path, Config *cfg)
 	parse_keybinds  (L, cfg);
 	parse_buttons   (L, cfg);
 	parse_autostart (L, cfg);
+	parse_animations(L, &cfg->animations);
 
 	lua_close(L);
 	return 0;

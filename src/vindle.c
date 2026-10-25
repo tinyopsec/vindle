@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <sys/stat.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -150,6 +151,18 @@ typedef struct {
 	uint32_t tags;
 	int isfloating, isurgent, isfullscreen;
 	uint32_t resize; /* configure serial of a pending resize */
+
+	/* geometry animation state. c->geom stays the protocol truth and
+	 * the tween target; the scene tree is drawn at the interpolated
+	 * box until the tween finishes. */
+	struct wlr_box anim_last;  /* box the tree is drawn at right now */
+	struct wlr_box anim_from, anim_to;
+	uint32_t anim_t0, anim_dur;
+	int anim_running;
+	int anim_fade;      /* fade opacity 0 -> 1 while running */
+	int anim_pending_open; /* first resize of a fresh window animates */
+	int anim_tagin;     /* slide in from a monitor edge, value is the direction */
+	float inner_col[4], outer_col[4]; /* base border colors for alpha fades */
 } Client;
 
 typedef struct {
@@ -287,6 +300,21 @@ typedef struct {
 /* function declarations */
 static void applybounds(Client *c, struct wlr_box *bbox);
 static void applyrules(Client *c);
+static void anim_curve_init(void);
+static float anim_ease(float x);
+static void anim_finish(Client *c);
+static void anim_fadeout_close(Client *c);
+static void anim_fadeout_tag(Client *c, int dir);
+static int anim_step(Client *c, uint32_t now);
+static void anim_tag_switch(Monitor *m, uint32_t oldtags, uint32_t newtags);
+static void anim_tag_finish_pending(Monitor *m);
+static void anim_target(Client *c);
+static void anim_kick(Monitor *m);
+static int fadeouts_step(Monitor *m, uint32_t now);
+static void fadeouts_destroy_mon(Monitor *m);
+static void fadeouts_destroy_all(void);
+static void client_draw_box(Client *c, const struct wlr_box *b);
+static uint32_t now_ms(void);
 static void arrange(Monitor *m);
 static void arrangelayer(Monitor *m, struct wl_list *list,
 		struct wlr_box *usable_area, int exclusive);
@@ -505,6 +533,28 @@ static struct wlr_xwayland *xwayland;
 static Config cfg;
 static struct wl_event_source *cfg_watch_src;
 static const char *custom_cfg_path;
+
+/* Close and tag-out animations run on snapshot trees that outlive
+ * their client. Buffers are shared by reference, nothing is copied. */
+typedef struct FadePart {
+	struct wlr_scene_node *node; /* rect or buffer inside the snapshot */
+	int x, y, w, h;              /* base geometry, scaled on zoom */
+	float col[4];                /* rect base color */
+} FadePart;
+
+typedef struct Fadeout {
+	struct wl_list link;
+	struct wlr_scene_tree *tree;
+	Monitor *mon;
+	struct wlr_box from, to;
+	uint32_t t0, dur;
+	int fade;  /* fade opacity to 0 */
+	int zoom;  /* scale parts instead of only moving */
+	FadePart parts[40];
+	int nparts;
+} Fadeout;
+
+static struct wl_list fadeouts;
 
 #include "config.h"
 
@@ -766,6 +816,8 @@ cleanup(void)
 	config_watch_stop(cfg_watch_src);
 	cfg_watch_src = NULL;
 	cleanuplisteners();
+	/* fadeout snapshots own scene trees, free them before the scene */
+	fadeouts_destroy_all();
 #ifdef XWAYLAND
 	if (xwayland) {
 		wlr_xwayland_destroy(xwayland);
@@ -821,6 +873,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 
 	closemon(m);
 	ext_workspace_cleanupmon(m);
+	fadeouts_destroy_mon(m);
 	for (int i = 0; i < TAGCOUNT; i++) {
 		dwindle_free_tree(m->dwindle_root[i]);
 		m->dwindle_root[i] = NULL;
@@ -2115,6 +2168,10 @@ mapnotify(struct wl_listener *listener, void *data)
 	wl_list_insert(&clients, &c->link);
 	wl_list_insert(&fstack, &c->flink);
 
+	/* the first resize of a fresh window runs the open animation */
+	if (cfg.animations.enabled && cfg.animations.open_type != CFG_ANIM_NONE)
+		c->anim_pending_open = 1;
+
 	/* Set initial monitor, tags, floating status, and focus:
 	 * we always consider floating, clients that have parent and thus
 	 * we set the same tags and monitor as its parent.
@@ -2472,13 +2529,28 @@ rendermon(struct wl_listener *listener, void *data)
 	Client *c;
 	struct wlr_output_state pending = {0};
 	struct timespec now;
+	int animating = 0, resizing = 0;
+
+	/* Step animations first so this frame already shows the new state. */
+	if (cfg.animations.enabled) {
+		uint32_t nowms = now_ms();
+		wl_list_for_each(c, &clients, link) {
+			if (c->anim_running && c->mon == m)
+				animating |= anim_step(c, nowms);
+		}
+		animating |= fadeouts_step(m, nowms);
+	}
 
 	/* Render if no XDG clients have an outstanding resize and are visible on
-	 * this monitor. */
+	 * this monitor. While animating (or dragging) frames keep flowing,
+	 * otherwise the output would stop presenting and the tween could
+	 * not tick. */
 	wl_list_for_each(c, &clients, link) {
 		if (c->resize && !c->isfloating && client_is_rendered_on_mon(c, m) && !client_is_stopped(c))
-			goto skip;
+			resizing = 1;
 	}
+	if (resizing && !animating && !grabc && !cfg.animations.enabled)
+		goto skip;
 
 	wlr_scene_output_commit(m->scene_output, NULL);
 
@@ -2487,6 +2559,9 @@ skip:
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(m->scene_output, &now);
 	wlr_output_state_finish(&pending);
+
+	if (animating)
+		wlr_output_schedule_frame(m->wlr_output);
 }
 
 void
@@ -2518,6 +2593,632 @@ requestmonstate(struct wl_listener *listener, void *data)
 	updatemons(NULL, NULL);
 }
 
+/* Animations. Clients are configured once at their final size and only
+ * the scene graph moves between boxes, so clients never repaint per
+ * frame. Geometry eases along a baked cubic bezier; opacity fades run
+ * linear, which reads better than an eased fade. */
+
+static uint32_t
+now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+#define ANIM_LUT_N 65
+static float anim_lut_x[ANIM_LUT_N], anim_lut_y[ANIM_LUT_N];
+
+static void
+anim_curve_init(void)
+{
+	float x1 = cfg.animations.curve[0], y1 = cfg.animations.curve[1];
+	float x2 = cfg.animations.curve[2], y2 = cfg.animations.curve[3];
+	int i;
+
+	/* CSS rule: x control points inside [0, 1] keep x(t) monotone,
+	 * which the lookup below relies on */
+	x1 = MIN(MAX(x1, 0.0f), 1.0f);
+	x2 = MIN(MAX(x2, 0.0f), 1.0f);
+
+	for (i = 0; i < ANIM_LUT_N; i++) {
+		float t = (float)i / (ANIM_LUT_N - 1);
+		float u = 1.0f - t;
+		anim_lut_x[i] = 3.0f * u * u * t * x1 + 3.0f * u * t * t * x2 + t * t * t;
+		anim_lut_y[i] = 3.0f * u * u * t * y1 + 3.0f * u * t * t * y2 + t * t * t;
+	}
+}
+
+static float
+anim_ease(float x)
+{
+	int lo = 0, hi = ANIM_LUT_N - 1;
+
+	if (x <= 0.0f)
+		return 0.0f;
+	if (x >= 1.0f)
+		return 1.0f;
+	/* binary search the segment, then interpolate y inside it */
+	while (hi - lo > 1) {
+		int mid = (lo + hi) / 2;
+		if (anim_lut_x[mid] <= x)
+			lo = mid;
+		else
+			hi = mid;
+	}
+	float span = anim_lut_x[hi] - anim_lut_x[lo];
+	float f = span > 0.0f ? (x - anim_lut_x[lo]) / span : 0.0f;
+	return anim_lut_y[lo] + (anim_lut_y[hi] - anim_lut_y[lo]) * f;
+}
+
+static void
+anim_kick(Monitor *m)
+{
+	if (m && m->wlr_output->enabled)
+		wlr_output_schedule_frame(m->wlr_output);
+}
+
+static void
+scene_buffer_set_opacity_iter(struct wlr_scene_buffer *buf, int sx, int sy,
+		void *data)
+{
+	wlr_scene_buffer_set_opacity(buf, *(float *)data);
+}
+
+static void
+client_set_tree_opacity(Client *c, float o)
+{
+	wlr_scene_node_for_each_buffer(&c->scene->node,
+			scene_buffer_set_opacity_iter, &o);
+}
+
+static void
+client_border_alpha(Client *c, float a)
+{
+	float col[4];
+	int i, j;
+
+	if (!c->inner_border[0])
+		return;
+	for (i = 0; i < 4; i++) {
+		for (j = 0; j < 4; j++)
+			col[j] = c->inner_col[j];
+		col[3] *= a;
+		wlr_scene_rect_set_color(c->inner_border[i], col);
+		for (j = 0; j < 4; j++)
+			col[j] = c->outer_col[j];
+		col[3] *= a;
+		wlr_scene_rect_set_color(c->outer_border[i], col);
+	}
+}
+
+/* Draw the client tree at box b: scene position, surface offset and the
+ * eight border rectangles. resize() calls this with c->geom, the
+ * animation ticker with the interpolated box. */
+static void
+client_draw_box(Client *c, const struct wlr_box *b)
+{
+	unsigned int ib = c->ibw, ob = c->obw;
+	int w = b->width, h = b->height;
+
+	wlr_scene_node_set_position(&c->scene->node, b->x, b->y);
+	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
+	c->anim_last = *b;
+
+	if (!c->inner_border[0])
+		return;
+
+	wlr_scene_rect_set_size(c->inner_border[0], MAX(1, w - 2 * (int)ob), (int)ib);
+	wlr_scene_node_set_position(&c->inner_border[0]->node, ob, ob);
+	wlr_scene_rect_set_size(c->inner_border[1], MAX(1, w - 2 * (int)ob), (int)ib);
+	wlr_scene_node_set_position(&c->inner_border[1]->node, ob, MAX(0, h - (int)ob - (int)ib));
+	wlr_scene_rect_set_size(c->inner_border[2], (int)ib, MAX(1, h - 2 * (int)ob));
+	wlr_scene_node_set_position(&c->inner_border[2]->node, ob, ob);
+	wlr_scene_rect_set_size(c->inner_border[3], (int)ib, MAX(1, h - 2 * (int)ob));
+	wlr_scene_node_set_position(&c->inner_border[3]->node, MAX(0, w - (int)ob - (int)ib), ob);
+
+	wlr_scene_rect_set_size(c->outer_border[0], MAX(1, w), (int)ob);
+	wlr_scene_node_set_position(&c->outer_border[0]->node, 0, 0);
+	wlr_scene_rect_set_size(c->outer_border[1], MAX(1, w), (int)ob);
+	wlr_scene_node_set_position(&c->outer_border[1]->node, 0, MAX(0, h - (int)ob));
+	wlr_scene_rect_set_size(c->outer_border[2], (int)ob, MAX(1, h - 2 * (int)ob));
+	wlr_scene_node_set_position(&c->outer_border[2]->node, 0, ob);
+	wlr_scene_rect_set_size(c->outer_border[3], (int)ob, MAX(1, h - 2 * (int)ob));
+	wlr_scene_node_set_position(&c->outer_border[3]->node, MAX(0, w - (int)ob), ob);
+}
+
+/* Same-size box of c->geom pushed just past the nearest monitor edge. */
+static struct wlr_box
+anim_slide_box(Client *c)
+{
+	struct wlr_box b = c->geom;
+	struct wlr_box *w = &c->mon->w;
+	int cx = b.x + b.width / 2, cy = b.y + b.height / 2;
+	int dl = cx - w->x, dr = w->x + w->width - cx;
+	int du = cy - w->y, dd = w->y + w->height - cy;
+
+	if (MIN(dl, dr) < MIN(du, dd)) {
+		if (dl < dr) b.x = w->x - b.width;
+		else b.x = w->x + w->width;
+	} else {
+		if (du < dd) b.y = w->y - b.height;
+		else b.y = w->y + w->height;
+	}
+	return b;
+}
+
+static struct wlr_box
+anim_zoom_box(Client *c, float ratio)
+{
+	struct wlr_box b;
+
+	b.width = (int)(c->geom.width * ratio);
+	b.height = (int)(c->geom.height * ratio);
+	b.x = c->geom.x + (c->geom.width - b.width) / 2;
+	b.y = c->geom.y + (c->geom.height - b.height) / 2;
+	return b;
+}
+
+/* Same-size box offscreen in the tag slide direction: dir > 0 means the
+ * view moved forward (to a higher tag), so windows come from the far
+ * edge. */
+static struct wlr_box
+anim_edge_box(Client *c, int dir)
+{
+	struct wlr_box b = c->geom;
+	struct wlr_box *m = &c->mon->m;
+
+	if (cfg.animations.tag_vertical)
+		b.y = dir > 0 ? m->y + m->height : m->y - b.height;
+	else
+		b.x = dir > 0 ? m->x + m->width : m->x - b.width;
+	return b;
+}
+
+/* Crop the surface to what fits inside the animated box so a smaller
+ * intermediate box cannot leak final-size content past the borders. */
+static void
+anim_apply_clip(Client *c, const struct wlr_box *b)
+{
+	struct wlr_box clip;
+
+	client_get_clip(c, &clip);
+	clip.width = MAX(0, MIN(clip.width, (int)b->width - 2 * (int)c->bw));
+	clip.height = MAX(0, MIN(clip.height, (int)b->height - 2 * (int)c->bw));
+	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+}
+
+static void
+anim_finish(Client *c)
+{
+	if (c->anim_running) {
+		c->anim_running = 0;
+		c->anim_fade = 0;
+		client_set_tree_opacity(c, 1.0f);
+		client_border_alpha(c, 1.0f);
+	}
+	c->anim_pending_open = 0;
+	c->anim_tagin = 0;
+}
+
+/* Start or retarget the geometry tween of c toward c->geom. */
+static void
+anim_target(Client *c)
+{
+	const CfgAnimations *a = &cfg.animations;
+	struct wlr_box from;
+	int dur, fade = 0;
+
+	if (c->anim_running && wlr_box_equal(&c->anim_to, &c->geom))
+		return; /* same destination already in flight */
+
+	if (c->anim_pending_open) {
+		/* Keep the flag until the first rendered tick: a fresh window
+		 * is resized twice on map (natural geometry, then its tile),
+		 * and the slide start box must follow the FINAL box, so the
+		 * window enters from its own edge instead of flying in from
+		 * the corner its pre-tiling geometry sat at. */
+		dur = a->duration_open;
+		fade = a->fade_in || a->open_type == CFG_ANIM_FADE;
+		switch (a->open_type) {
+		case CFG_ANIM_SLIDE: from = anim_slide_box(c); break;
+		case CFG_ANIM_ZOOM:  from = anim_zoom_box(c, 0.7f); break;
+		default:             from = c->geom; break;
+		}
+	} else if (c->anim_tagin) {
+		dur = a->duration_tag;
+		from = anim_edge_box(c, c->anim_tagin);
+		c->anim_tagin = 0;
+	} else {
+		dur = a->duration_move;
+		from = c->anim_last;
+		if (!from.width && !from.height)
+			from = c->geom; /* never drawn yet */
+	}
+
+	if (dur <= 0 || (wlr_box_equal(&from, &c->geom) && !fade)) {
+		anim_finish(c);
+		client_draw_box(c, &c->geom);
+		return;
+	}
+
+	if (c->anim_running && !c->anim_pending_open) {
+		/* retarget mid flight: continue from the box on screen now.
+		 * During the open cascade the from box was just recomputed
+		 * from the final geometry above; the mid-flight box was never
+		 * shown (no frame ran between the two resizes), so keeping it
+		 * would fly the window in from its pre-tiling corner (B13). */
+		from = c->anim_last;
+		fade = fade || c->anim_fade;
+	}
+
+	c->anim_from = from;
+	c->anim_to = c->geom;
+	c->anim_dur = (uint32_t)dur;
+	c->anim_t0 = now_ms();
+	c->anim_fade = fade;
+	c->anim_running = 1;
+	client_draw_box(c, &from);
+	anim_apply_clip(c, &from);
+	if (fade) {
+		client_set_tree_opacity(c, 0.0f);
+		client_border_alpha(c, 0.0f);
+	}
+	anim_kick(c->mon);
+}
+
+/* One tween step; returns 1 while the animation is still running. */
+static int
+anim_step(Client *c, uint32_t now)
+{
+	double p, e;
+	struct wlr_box b, clip;
+
+	/* the open has been shown on screen once: later resizes are moves */
+	c->anim_pending_open = 0;
+
+	if (!c->anim_dur || now - c->anim_t0 >= c->anim_dur)
+		p = 1.0;
+	else
+		p = (double)(now - c->anim_t0) / c->anim_dur;
+	e = anim_ease(p);
+
+	b.x = c->anim_from.x + (int)llround((c->anim_to.x - c->anim_from.x) * e);
+	b.y = c->anim_from.y + (int)llround((c->anim_to.y - c->anim_from.y) * e);
+	b.width = c->anim_from.width + (int)llround((c->anim_to.width - c->anim_from.width) * e);
+	b.height = c->anim_from.height + (int)llround((c->anim_to.height - c->anim_from.height) * e);
+
+	client_draw_box(c, &b);
+	anim_apply_clip(c, &b);
+	if (c->anim_fade) {
+		/* linear alpha mirrors the linear fadeout of close */
+		client_set_tree_opacity(c, (float)p);
+		client_border_alpha(c, (float)p);
+	}
+
+	if (p >= 1.0) {
+		anim_finish(c);
+		client_draw_box(c, &c->geom);
+		client_get_clip(c, &clip);
+		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+		return 0;
+	}
+	return 1;
+}
+
+/* Fadeout snapshots. The tree is a shallow copy of the client tree whose
+ * scene buffers reference the same wlr_buffers, so no pixels are copied
+ * and the snapshot survives the client. */
+static void
+snapshot_node(struct wlr_scene_node *node, struct wlr_scene_tree *dst, Fadeout *f)
+{
+	switch (node->type) {
+	case WLR_SCENE_NODE_TREE: {
+		struct wlr_scene_tree *t = wlr_scene_tree_from_node(node);
+		struct wlr_scene_tree *copy = wlr_scene_tree_create(dst);
+		struct wlr_scene_node *child;
+
+		wlr_scene_node_set_position(&copy->node, node->x, node->y);
+		if (f->nparts < (int)LENGTH(f->parts)) {
+			FadePart *p = &f->parts[f->nparts++];
+			p->node = &copy->node;
+			p->x = node->x;
+			p->y = node->y;
+			p->w = p->h = 0;
+		}
+		wl_list_for_each(child, &t->children, link)
+			if (child->enabled)
+				snapshot_node(child, copy, f);
+		break;
+	}
+	case WLR_SCENE_NODE_BUFFER: {
+		struct wlr_scene_buffer *sb = wlr_scene_buffer_from_node(node);
+		struct wlr_scene_buffer *copy = wlr_scene_buffer_create(dst, sb->buffer);
+
+		wlr_scene_node_set_position(&copy->node, node->x, node->y);
+		wlr_scene_buffer_set_opacity(copy, sb->opacity);
+		wlr_scene_buffer_set_transform(copy, sb->transform);
+		if (sb->dst_width || sb->dst_height)
+			wlr_scene_buffer_set_dest_size(copy, sb->dst_width, sb->dst_height);
+		if (!wlr_fbox_empty(&sb->src_box))
+			wlr_scene_buffer_set_source_box(copy, &sb->src_box);
+		if (f->nparts < (int)LENGTH(f->parts)) {
+			FadePart *p = &f->parts[f->nparts++];
+			p->node = &copy->node;
+			p->x = node->x;
+			p->y = node->y;
+			p->w = sb->dst_width ? sb->dst_width :
+					(sb->buffer ? sb->buffer->width : 0);
+			p->h = sb->dst_height ? sb->dst_height :
+					(sb->buffer ? sb->buffer->height : 0);
+		}
+		break;
+	}
+	case WLR_SCENE_NODE_RECT: {
+		struct wlr_scene_rect *r = wlr_scene_rect_from_node(node);
+		struct wlr_scene_rect *copy =
+				wlr_scene_rect_create(dst, r->width, r->height, r->color);
+
+		wlr_scene_node_set_position(&copy->node, node->x, node->y);
+		if (f->nparts < (int)LENGTH(f->parts)) {
+			FadePart *p = &f->parts[f->nparts++];
+			p->node = &copy->node;
+			p->x = node->x;
+			p->y = node->y;
+			p->w = r->width;
+			p->h = r->height;
+			memcpy(p->col, r->color, sizeof(p->col));
+		}
+		break;
+	}
+	}
+}
+
+static void
+anim_fadeout_create(Client *c, struct wlr_box to, int dur, int fade, int zoom)
+{
+	Fadeout *f;
+	struct wlr_scene_node *child;
+	struct wlr_box from = c->anim_last;
+	int surface_was_enabled;
+
+	if (dur <= 0 || !c->scene || !c->scene->node.parent || !c->mon)
+		return;
+	if (!from.width && !from.height)
+		from = c->geom;
+
+	f = ecalloc(1, sizeof(*f));
+	f->mon = c->mon;
+	f->from = from;
+	f->to = to;
+	f->t0 = now_ms();
+	f->dur = (uint32_t)dur;
+	f->fade = fade;
+	f->zoom = zoom;
+	f->tree = wlr_scene_tree_create(c->scene->node.parent);
+
+	/* the xdg scene tree may already be disabled by the unmap; the
+	 * snapshot must see it enabled to copy the last frame */
+	surface_was_enabled = c->scene_surface->node.enabled;
+	wlr_scene_node_set_enabled(&c->scene_surface->node, 1);
+	wl_list_for_each(child, &c->scene->children, link)
+		if (child->enabled)
+			snapshot_node(child, f->tree, f);
+	wlr_scene_node_set_enabled(&c->scene_surface->node, surface_was_enabled);
+
+	if (f->nparts == 0) {
+		wlr_scene_node_destroy(&f->tree->node);
+		free(f);
+		return;
+	}
+	wlr_scene_node_set_position(&f->tree->node, from.x, from.y);
+	wl_list_insert(&fadeouts, &f->link);
+	anim_kick(f->mon);
+}
+
+static void
+anim_fadeout_close(Client *c)
+{
+	const CfgAnimations *a = &cfg.animations;
+	struct wlr_box to;
+	int fade, zoom = 0;
+
+	if (a->close_type == CFG_ANIM_NONE || !c->scene->node.enabled)
+		return; /* invisible windows close without a trace */
+
+	fade = a->fade_out || a->close_type == CFG_ANIM_FADE;
+	switch (a->close_type) {
+	case CFG_ANIM_SLIDE: to = anim_slide_box(c); break;
+	case CFG_ANIM_ZOOM:
+		to = anim_zoom_box(c, 0.8f);
+		zoom = 1;
+		break;
+	default: to = c->anim_last; break;
+	}
+	if (!to.width && !to.height)
+		to = c->geom;
+	anim_fadeout_create(c, to, a->duration_close, fade, zoom);
+}
+
+/* The old tag set slides out against the direction the view moved in. */
+static void
+anim_fadeout_tag(Client *c, int dir)
+{
+	struct wlr_box b = c->anim_last;
+	struct wlr_box *m = &c->mon->m;
+
+	if (!b.width && !b.height)
+		b = c->geom;
+	if (cfg.animations.tag_vertical)
+		b.y = dir > 0 ? m->y - b.height : m->y + m->height;
+	else
+		b.x = dir > 0 ? m->x - b.width : m->x + m->width;
+	anim_fadeout_create(c, b, cfg.animations.duration_tag, 0, 0);
+}
+
+static void
+fadeout_set_look(Fadeout *f, const struct wlr_box *b, double p)
+{
+	float sx, sy, o;
+	int i;
+
+	wlr_scene_node_set_position(&f->tree->node, b->x, b->y);
+	if (f->zoom && f->from.width && f->from.height) {
+		/* uniform scale of the whole snapshot hierarchy */
+		sx = (float)b->width / f->from.width;
+		sy = (float)b->height / f->from.height;
+		for (i = 0; i < f->nparts; i++) {
+			FadePart *p = &f->parts[i];
+			wlr_scene_node_set_position(p->node,
+					(int)llround(p->x * sx), (int)llround(p->y * sy));
+			if (p->node->type == WLR_SCENE_NODE_RECT)
+				wlr_scene_rect_set_size(wlr_scene_rect_from_node(p->node),
+						MAX(1, (int)llround(p->w * sx)),
+						MAX(1, (int)llround(p->h * sy)));
+			else if (p->w && p->h)
+				wlr_scene_buffer_set_dest_size(wlr_scene_buffer_from_node(p->node),
+						MAX(1, (int)llround(p->w * sx)),
+						MAX(1, (int)llround(p->h * sy)));
+		}
+	}
+	if (f->fade) {
+		o = 1.0f - (float)p;
+		wlr_scene_node_for_each_buffer(&f->tree->node,
+				scene_buffer_set_opacity_iter, &o);
+		for (i = 0; i < f->nparts; i++) {
+			FadePart *p = &f->parts[i];
+			float col[4];
+
+			if (p->node->type != WLR_SCENE_NODE_RECT)
+				continue;
+			memcpy(col, p->col, sizeof(col));
+			col[3] *= o;
+			wlr_scene_rect_set_color(wlr_scene_rect_from_node(p->node), col);
+		}
+	}
+}
+
+static int
+fadeouts_step(Monitor *m, uint32_t now)
+{
+	Fadeout *f, *tmp;
+	int running = 0;
+
+	wl_list_for_each_safe(f, tmp, &fadeouts, link) {
+		double p, e;
+		struct wlr_box b;
+
+		if (f->mon != m)
+			continue;
+		if (!f->dur || now - f->t0 >= f->dur)
+			p = 1.0;
+		else
+			p = (double)(now - f->t0) / f->dur;
+		e = anim_ease(p);
+
+		b.x = f->from.x + (int)llround((f->to.x - f->from.x) * e);
+		b.y = f->from.y + (int)llround((f->to.y - f->from.y) * e);
+		b.width = f->from.width + (int)llround((f->to.width - f->from.width) * e);
+		b.height = f->from.height + (int)llround((f->to.height - f->from.height) * e);
+
+		fadeout_set_look(f, &b, p);
+		if (p >= 1.0) {
+			wl_list_remove(&f->link);
+			wlr_scene_node_destroy(&f->tree->node);
+			free(f);
+		} else
+			running = 1;
+	}
+	return running;
+}
+
+static void
+fadeouts_destroy_mon(Monitor *m)
+{
+	Fadeout *f, *tmp;
+
+	wl_list_for_each_safe(f, tmp, &fadeouts, link) {
+		if (f->mon != m)
+			continue;
+		wl_list_remove(&f->link);
+		wlr_scene_node_destroy(&f->tree->node);
+		free(f);
+	}
+}
+
+static void
+fadeouts_destroy_all(void)
+{
+	Fadeout *f, *tmp;
+
+	wl_list_for_each_safe(f, tmp, &fadeouts, link) {
+		wl_list_remove(&f->link);
+		wlr_scene_node_destroy(&f->tree->node);
+		free(f);
+	}
+}
+
+static int
+tags_low_idx(uint32_t tags)
+{
+	int i = 0;
+
+	if (!tags)
+		return 0;
+	while (!(tags & 1u)) {
+		tags >>= 1;
+		i++;
+	}
+	return i;
+}
+
+/* Compare the old and new tag sets: leaving windows slide out as
+ * snapshots, entering windows get the slide-in flag consumed by their
+ * next resize. */
+static void
+anim_tag_switch(Monitor *m, uint32_t oldtags, uint32_t newtags)
+{
+	Client *c;
+	int dir;
+
+	if (!cfg.animations.enabled || cfg.animations.duration_tag <= 0)
+		return;
+	if (!oldtags || !newtags || oldtags == newtags)
+		return;
+
+	dir = tags_low_idx(newtags) >= tags_low_idx(oldtags) ? 1 : -1;
+
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon != m || client_is_unmanaged(c))
+			continue;
+		if (c->tags & oldtags & ~newtags) {
+			if (c->scene->node.enabled)
+				anim_fadeout_tag(c, dir);
+		} else if (c->tags & newtags & ~oldtags) {
+			c->anim_tagin = dir;
+		}
+	}
+}
+
+/* Floating clients never pass through the tiling resize path on a tag
+ * switch; run their pending slide-in here. */
+static void
+anim_tag_finish_pending(Monitor *m)
+{
+	Client *c;
+
+	if (!cfg.animations.enabled)
+		return;
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon != m || !c->anim_tagin)
+			continue;
+		if (VISIBLEON(c, m))
+			resize(c, c->geom, 0);
+		else
+			c->anim_tagin = 0;
+	}
+}
+
 void
 resize(Client *c, struct wlr_box geo, int interact)
 {
@@ -2533,41 +3234,22 @@ resize(Client *c, struct wlr_box geo, int interact)
 	c->geom = geo;
 	applybounds(c, bbox);
 
-	/* Update scene-graph, including borders.
-	 * Outer ring sits flush with the client's outer edge (0,0 .. w,h).
-	 * Inner ring is inset by obw from the outer ring.
-	 * The surface itself is inset by the full bw = ibw + obw. */
-	{
-		unsigned int ib = c->ibw, ob = c->obw;
-		int w = c->geom.width, h = c->geom.height;
-
-		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
-		wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
-
-		wlr_scene_rect_set_size(c->inner_border[0], MAX(1, w - 2 * (int)ob), (int)ib);
-		wlr_scene_node_set_position(&c->inner_border[0]->node, ob, ob);
-		wlr_scene_rect_set_size(c->inner_border[1], MAX(1, w - 2 * (int)ob), (int)ib);
-		wlr_scene_node_set_position(&c->inner_border[1]->node, ob, MAX(0, h - (int)ob - (int)ib));
-		wlr_scene_rect_set_size(c->inner_border[2], (int)ib, MAX(1, h - 2 * (int)ob));
-		wlr_scene_node_set_position(&c->inner_border[2]->node, ob, ob);
-		wlr_scene_rect_set_size(c->inner_border[3], (int)ib, MAX(1, h - 2 * (int)ob));
-		wlr_scene_node_set_position(&c->inner_border[3]->node, MAX(0, w - (int)ob - (int)ib), ob);
-
-		wlr_scene_rect_set_size(c->outer_border[0], MAX(1, w), (int)ob);
-		wlr_scene_node_set_position(&c->outer_border[0]->node, 0, 0);
-		wlr_scene_rect_set_size(c->outer_border[1], MAX(1, w), (int)ob);
-		wlr_scene_node_set_position(&c->outer_border[1]->node, 0, MAX(0, h - (int)ob));
-		wlr_scene_rect_set_size(c->outer_border[2], (int)ob, MAX(1, h - 2 * (int)ob));
-		wlr_scene_node_set_position(&c->outer_border[2]->node, 0, ob);
-		wlr_scene_rect_set_size(c->outer_border[3], (int)ob, MAX(1, h - 2 * (int)ob));
-		wlr_scene_node_set_position(&c->outer_border[3]->node, MAX(0, w - (int)ob), ob);
+	/* The client is configured at its final size right away; the tween
+	 * only moves the scene tree. Grabs follow the cursor instantly. */
+	if (interact || c == grabc || !cfg.animations.enabled) {
+		anim_finish(c);
+		client_draw_box(c, &c->geom);
+	} else {
+		anim_target(c);
 	}
 
 	/* this is a no-op if size hasn't changed */
 	c->resize = client_set_size(c, c->geom.width - 2 * c->bw,
 			c->geom.height - 2 * c->bw);
-	client_get_clip(c, &clip);
-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	if (!c->anim_running) {
+		client_get_clip(c, &clip);
+		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	}
 }
 
 void
@@ -2775,8 +3457,23 @@ static void
 on_config_reload(const Config *newcfg, void *ud)
 {
 	Monitor *m;
+	Client *c;
 	(void)ud;
 	cfg = *newcfg;
+	anim_curve_init();
+	if (!cfg.animations.enabled) {
+		/* finish anything in flight so nothing stays half faded */
+		wl_list_for_each(c, &clients, link) {
+			if (!c->anim_running)
+				continue;
+			anim_finish(c);
+			client_draw_box(c, &c->geom);
+			struct wlr_box clip;
+			client_get_clip(c, &clip);
+			wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+		}
+		fadeouts_destroy_all();
+	}
 	wl_list_for_each(m, &mons, link) {
 		/* Re-apply monitor rule fields that arrange reads live.
 		 * Same match as createmon: first rule with empty name or
@@ -2839,6 +3536,9 @@ setup(void)
 	}
 
 	wlr_log_init(cfg.log_level, NULL);
+
+	wl_list_init(&fadeouts);
+	anim_curve_init();
 
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, managing Wayland globals, and so on and so forth */
@@ -3548,13 +4248,16 @@ toggletag(const Arg *arg)
 void
 toggleview(const Arg *arg)
 {
-	uint32_t newtagset;
+	uint32_t newtagset, oldtags;
 	if (!(newtagset = selmon ? selmon->tagset[selmon->seltags] ^ (arg->ui & TAGMASK) : 0))
 		return;
 
+	oldtags = selmon->tagset[selmon->seltags];
 	selmon->tagset[selmon->seltags] = newtagset;
+	anim_tag_switch(selmon, oldtags, newtagset);
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
+	anim_tag_finish_pending(selmon);
 	printstatus();
 }
 
@@ -3599,6 +4302,9 @@ unmapnotify(struct wl_listener *listener, void *data)
 	} else {
 		wl_list_remove(&c->link);
 		dwindle_remove_client(c);
+		/* snapshot the closing window while its tree still exists */
+		if (cfg.animations.enabled)
+			anim_fadeout_close(c);
 		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);
 	}
@@ -3736,8 +4442,11 @@ urgent(struct wl_listener *listener, void *data)
 void
 view(const Arg *arg)
 {
+	uint32_t oldtags;
+
 	if (!selmon || (arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
 		return;
+	oldtags = selmon->tagset[selmon->seltags];
 	/* Mid-drag tag/view takes the window along. */
 	if (arg->ui & TAGMASK) {
 		Client *drag = dragtarget();
@@ -3747,8 +4456,10 @@ view(const Arg *arg)
 	selmon->seltags ^= 1; /* toggle sel tagset */
 	if (arg->ui & TAGMASK)
 		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
+	anim_tag_switch(selmon, oldtags, selmon->tagset[selmon->seltags]);
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
+	anim_tag_finish_pending(selmon);
 	printstatus();
 }
 
@@ -3798,9 +4509,15 @@ xytonode(double x, double y, struct wlr_surface **psurface,
 		if (!(node = wlr_scene_node_at(&layers[layer]->node, x, y, nx, ny)))
 			continue;
 
-		if (node->type == WLR_SCENE_NODE_BUFFER)
-			surface = wlr_scene_surface_try_from_buffer(
-					wlr_scene_buffer_from_node(node))->surface;
+		if (node->type == WLR_SCENE_NODE_BUFFER) {
+			/* Fadeout snapshots place bare buffers in the layer trees;
+			 * they own no wlr_scene_surface (B12). */
+			struct wlr_scene_surface *scene_surface =
+					wlr_scene_surface_try_from_buffer(
+					wlr_scene_buffer_from_node(node));
+			if (scene_surface)
+				surface = scene_surface->surface;
+		}
 		/* Walk the tree to find a node that knows the client */
 		for (pnode = node; pnode && !c; pnode = &pnode->parent->node)
 			c = pnode->data;

@@ -69,6 +69,25 @@ autostart = {
     "waybar",
 }
 
+-- Animations. Durations in ms, 0 disables the kind. Types: "none",
+-- "slide", "zoom", "fade". Open is the close animation in reverse: the
+-- window slides in from the nearest edge with a fade. Clients repaint
+-- nothing per frame: windows are configured at their final size at
+-- once, only the scene graph moves.
+animations = {
+    enabled        = true,
+    duration_move  = 260,   -- tiled geometry changes (new window, close, swap)
+    duration_open  = 220,   -- same as close, so both directions mirror
+    duration_close = 220,
+    duration_tag   = 220,   -- tag switch slide in/out
+    open_type      = "slide",    -- in from the nearest edge
+    close_type     = "slide",    -- out to the nearest edge
+    tag_slide      = "horizontal",  -- "horizontal" or "vertical"
+    fade_in        = true,  -- fade opacity in on open
+    fade_out       = true,  -- fade opacity out on close
+    curve          = { 0.46, 1.0, 0.29, 0.99 },
+}
+
 
 -- Comfortable keymap, MODKEY = logo.
 -- foot replaces st, fuzzel replaces dmenu_run (Wayland-native).

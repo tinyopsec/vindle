@@ -315,6 +315,8 @@ client_set_border_color(Client *c, const float inner[static 4], const float oute
 {
     int i;
     for (i = 0; i < 4; i++) {
+	c->inner_col[i] = inner[i];
+	c->outer_col[i] = outer[i];
 	wlr_scene_rect_set_color(c->inner_border[i], inner);
 	wlr_scene_rect_set_color(c->outer_border[i], outer);
     }

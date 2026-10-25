@@ -103,6 +103,25 @@ typedef struct {
 	char cmd[CFG_MAX_AUTOSTART_CMD];
 } CfgAutostart;
 
+/* Animations. Durations in ms, 0 disables the kind. Types: 0 none,
+ * 1 slide, 2 zoom, 3 fade. Curve is one shared cubic bezier
+ * (x1, y1, x2, y2), CSS style. */
+enum { CFG_ANIM_NONE, CFG_ANIM_SLIDE, CFG_ANIM_ZOOM, CFG_ANIM_FADE };
+
+typedef struct {
+	int    enabled;
+	int    duration_move;
+	int    duration_open;
+	int    duration_close;
+	int    duration_tag;
+	int    open_type;
+	int    close_type;
+	int    tag_vertical; /* 0 horizontal slide, 1 vertical */
+	int    fade_in;      /* combine open with an opacity fade */
+	int    fade_out;     /* combine close with an opacity fade */
+	float  curve[4];
+} CfgAnimations;
+
 /* the whole shebang */
 
 typedef struct {
@@ -128,6 +147,8 @@ typedef struct {
 
 	CfgAutostart  autostart[CFG_MAX_AUTOSTART];
 	int           nautostart;
+
+	CfgAnimations animations;
 } Config;
 
 /* Public API */

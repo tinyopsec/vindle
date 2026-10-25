@@ -1,7 +1,7 @@
 <div align="center">
   <img src="https://capsule-render.vercel.app/api?type=waving&color=222222&height=80&section=header&text=vindle&fontSize=52&fontColor=FFFFFF&fontAlignY=72&animation=fadeIn" alt="vindle header">
   <br>
-  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=14&pause=1200&color=FFFFFF&center=true&vCenter=true&width=600&lines=Minimal+tiling+Wayland+compositor;Double+border.+Dwindle+layout.+us%2Cru+out+of+the+box;Small+source.+Lua+config.+No+animations" alt="vindle typing">
+  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=14&pause=1200&color=FFFFFF&center=true&vCenter=true&width=600&lines=Minimal+tiling+Wayland+compositor;Double+border.+Dwindle+layout.+us%2Cru+out+of+the+box;Small+source.+Lua+config.+Fast+animations" alt="vindle typing">
   <br>
   <img src="https://raw.githubusercontent.com/tinyopsec/assets/main/vindle/vindle.webp" style="width: 65%; height: auto;" alt="logo">
 </div>
@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/license-GPL--3.0-FFFFFF?style=flat&labelColor=222222&logo=opensourceinitiative&logoColor=FFFFFF" alt="license GPL-3.0">
   <img src="https://img.shields.io/badge/C11-CCCCCC?style=flat&label=lang&labelColor=222222&logo=c&logoColor=CCCCCC" alt="C11">
   <img src="https://img.shields.io/badge/%7E7700%20lines-FFFFFF?style=flat&label=source&labelColor=222222&logo=files&logoColor=FFFFFF" alt="about 7700 lines of C, headers and Lua">
-  <img src="https://img.shields.io/badge/0.1-CCCCCC?style=flat&label=version&labelColor=222222&logo=tag&logoColor=CCCCCC" alt="version 0.1">
+  <img src="https://img.shields.io/badge/0.2-CCCCCC?style=flat&label=version&labelColor=222222&logo=tag&logoColor=CCCCCC" alt="version 0.1">
   &nbsp;
   <img src="https://img.shields.io/badge/Linux-FFFFFF?style=flat&labelColor=222222&logo=linux&logoColor=FFFFFF" alt="Linux">
   &nbsp;
@@ -65,7 +65,7 @@ vindle
 
 ## What vindle is
 
-vindle manages windows and input on Wayland and nothing else. One tiling layout (dwindle) plus floating, 9 tags as a bitmask, predictable focus, a double border inherited from the swindle lineage and kept. No bar, no widgets, no wallpaper, no animations, no themes. External programs cover the rest: foot, fuzzel, waybar, swaybg.
+vindle manages windows and input on Wayland and nothing else. One tiling layout (dwindle) plus floating, 9 tags as a bitmask, predictable focus, a double border inherited from the swindle lineage and kept, optional fast animations. No bar, no widgets, no wallpaper, no themes. External programs cover the rest: foot, fuzzel, waybar, swaybg.
 
 It is written to be read. About 7700 lines of C, headers and Lua in total, the compositor itself about 3900. If you spare an evening you will know where everything lives.
 
@@ -78,6 +78,7 @@ Everything below is user visible, no refactors for beauty:
 - Comfortable standard keymap (hjkl focus, t tile, f float, g gaps)
 - `us` first and `ru` second out of the box with Alt+Shift toggle (I am Kazakh, Russian is near native, Latin must work on first boot); one line in `input.layout` changes the order, binds work in every layout
 - Dwindle honors the monitor `mfact` instead of always splitting evenly
+- Optional fast animations for opening, closing, tiling changes and tag switches, driven purely by the scene graph: windows are configured once at their final size and only the compositor side moves, so clients never repaint per frame
 - Mouse drag floats a tiled window in place and carries it across tags
 - Unknown config keys print a warning instead of failing silently
 - Monitor fields reapply on config save, no restart dance for them
@@ -92,6 +93,7 @@ Everything below is user visible, no refactors for beauty:
 | Category | Details |
 |---|---|
 | Layouts | Dwindle (binary split, honors `mfact`) and floating |
+| Animations | Configurable open, close, move and tag switch animations with a shared cubic bezier curve. Opening is the close animation in reverse: a slide from the nearest edge with a fade, same duration both ways; a duration of 0 or `enabled = false` gives the fully static behavior |
 | Workspaces | 9 tags via bitmasks; windows may carry multiple tags |
 | Mouse support | Move, resize, toggle floating via modifier plus button; a tiled window floats in place at its current size; carry a dragged window to another tag with the tag keys |
 | Gaps | Configurable `gaps` with `smart_gaps`; toggle at run time with `Mod+g` |
@@ -270,6 +272,7 @@ The chain is `example/config.lua` (repo) to `/etc/vindle/config.lua` (installed 
 | Top level | `sloppy_focus`, `bypass_surface_visibility`, `log_level` |
 | `appearance` | Inner and outer border widths and colors (normal, focus, urgent), `gaps`, `smart_gaps`, root and fullscreen colors |
 | `input` | Repeat rate and delay, libinput options, `layout`/`variant`/`options` for XKB |
+| `animations` | Master switch, per kind durations in ms, open and close types (`none`, `slide`, `zoom`, `fade`), tag slide axis, opacity fades, one shared cubic bezier `curve` |
 | `rules` | `app_id`, `title`, `tags`, `floating`, `monitor` per window |
 | `monitors` | `name`, `mfact`, `nmaster`, `scale`, `layout`, `transform`, `x`, `y` per output |
 | `keybinds`, `buttons` | Mods plus key or button plus action plus args |
@@ -278,6 +281,7 @@ The chain is `example/config.lua` (repo) to `/etc/vindle/config.lua` (installed 
 Reload notes:
 
 - Appearance, rules, binds, autostart list and monitor `mfact` apply on save without a restart
+- Animation settings (durations, types, curve) apply on save; running tweens finish on their own
 - Input options (repeat, libinput, layout) apply at startup only
 - Misspelled keys print `unknown key` warnings to standard error. The session keeps running
 

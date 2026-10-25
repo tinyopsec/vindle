@@ -1,4 +1,4 @@
-.TH VINDLE 1 "2026-10-12" "vindle\-VERSION"
+.TH VINDLE 1 "2026-10-25" "vindle\-VERSION"
 .SH NAME
 vindle \- minimal tiling Wayland compositor
 .SH SYNOPSIS
@@ -98,6 +98,36 @@ Focused window colors.
 .TP
 .B inner_urgent_color , outer_urgent_color
 Urgent window colors.
+.SS animations
+Optional geometry and opacity animations, all driven by the scene graph.
+Windows are configured once at their final size and only the compositor
+side moves, so clients never repaint per frame. Durations are in
+milliseconds, 0 disables the kind.
+.TP
+.B enabled
+Master switch (default true). False gives the fully static behavior.
+.TP
+.B duration_move , duration_open , duration_close , duration_tag
+Durations of tiled geometry changes, window opening, window closing
+and tag switches (default 260, 220, 220, 220). Open and close share
+a duration so both directions of the slide mirror each other.
+.TP
+.B open_type , close_type
+One of none, slide (from or to the nearest monitor edge), zoom
+(scale in or out around the window center), fade (opacity only,
+in place). Default slide for both: opening is the close animation
+played in reverse.
+.TP
+.B tag_slide
+horizontal or vertical slide axis for tag switches (default horizontal).
+.TP
+.B fade_in , fade_out
+Combine open and close with an opacity fade (default true).
+.TP
+.B curve
+One shared cubic bezier curve as four numbers
+(x1, y1, x2, y2), CSS style (default 0.46 1.0 0.29 0.99, an ease out).
+Reloads rebuild the curve on save.
 .SS input
 .TP
 .B repeat_rate , repeat_delay
