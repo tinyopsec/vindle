@@ -619,13 +619,6 @@ arrange(Monitor *m)
 	if (!m->wlr_output->enabled)
 		return;
 
-	wl_list_for_each(c, &clients, link) {
-		if (c->mon == m) {
-			wlr_scene_node_set_enabled(&c->scene->node, VISIBLEON(c, m));
-			client_set_suspended(c, !VISIBLEON(c, m));
-		}
-	}
-
 	wlr_scene_node_set_enabled(&m->fullscreen_bg->node,
 			(c = focustop(m)) && c->isfullscreen);
 
@@ -645,8 +638,20 @@ arrange(Monitor *m)
 								: c->scene->node.parent);
 	}
 
+	/* Run tiling (and any pending tag slide-in resizes) before flipping
+	 * visibility, so arriving windows start their tween from the offscreen
+	 * box instead of flashing at their final position for one frame. */
 	if (m->lt[m->sellt]->arrange)
 		m->lt[m->sellt]->arrange(m);
+	anim_tag_finish_pending(m);
+
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon == m) {
+			wlr_scene_node_set_enabled(&c->scene->node, VISIBLEON(c, m));
+			client_set_suspended(c, !VISIBLEON(c, m));
+		}
+	}
+
 	motionnotify(0, NULL, 0, 0, 0, 0);
 	checkidleinhibitor(NULL);
 }
@@ -3181,6 +3186,7 @@ anim_tag_switch(Monitor *m, uint32_t oldtags, uint32_t newtags)
 	Client *c;
 	int dir;
 
+
 	if (!cfg.animations.enabled || cfg.animations.duration_tag <= 0)
 		return;
 	if (!oldtags || !newtags || oldtags == newtags)
@@ -3231,12 +3237,18 @@ resize(Client *c, struct wlr_box geo, int interact)
 	bbox = interact ? &sgeom : &c->mon->w;
 
 	client_set_bounds(c, geo.width, geo.height);
+	/* Keep track of whether the requested geometry actually changed, so an
+	 * in-flight tag slide-in is not cancelled by a redundant resize (e.g.
+	 * a floating client committing its surface mid-animation). */
+	int same_geom = wlr_box_equal(&c->geom, &geo);
 	c->geom = geo;
 	applybounds(c, bbox);
 
 	/* The client is configured at its final size right away; the tween
 	 * only moves the scene tree. Grabs follow the cursor instantly. */
-	if (interact || c == grabc || !cfg.animations.enabled) {
+	if (c->anim_running && same_geom && cfg.animations.enabled) {
+		/* keep the in-flight animation running */
+	} else if (interact || c == grabc || !cfg.animations.enabled) {
 		anim_finish(c);
 		client_draw_box(c, &c->geom);
 	} else {
