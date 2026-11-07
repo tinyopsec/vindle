@@ -33,3 +33,12 @@ PKGS      = wayland-server xkbcommon libinput $(LUA_PKG) $(XLIBS)
 
 # Requires C11: _Alignas and anonymous unions in wlroots headers.
 CC = cc
+
+# Speed without breaking compatibility: baseline ISA only. No
+# -march=native and no -march=x86-64-v2/v3: those would hard require
+# AVX/SSE4 CPUs and break older machines (violates Linux-first portability).
+# -O3 -flto -fno-plt -fomit-frame-pointer only reorder/inline code;
+# the binary still runs on any x86-64 / aarch64 / BSD. Override with
+# `make CFLAGS="-O2"` if the optimizer misbehaves on some toolchain.
+CFLAGS = -O3 -flto -fno-plt -fomit-frame-pointer -ffunction-sections -fdata-sections
+LDFLAGS = -Wl,--gc-sections

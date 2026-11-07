@@ -6,13 +6,13 @@ include config.mk
 VINDLECFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) \
 	-I. -Iinclude -Isrc -Iparser -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L -DVERSION=\"$(VERSION)\" \
 	-DVINDLE_ETCDIR=\"$(ETCDIR)\" \
-	$(XWAYLAND) -g -Wall -Wextra -Wno-unused-parameter -O1 -std=c11 $(CFLAGS)
+	$(XWAYLAND) -g -Wall -Wextra -Wno-unused-parameter -std=c11 $(CFLAGS)
 LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm $(LIBS)
 
 SCANNER   = `$(PKG_CONFIG) --variable=wayland_scanner wayland-scanner`
 PROTOCOLS = `$(PKG_CONFIG) --variable=pkgdatadir wayland-protocols`
 
-SMSG_CFLAGS = `$(PKG_CONFIG) --cflags wayland-client` -Wall -Wextra -Wno-unused-parameter
+SMSG_CFLAGS = `$(PKG_CONFIG) --cflags wayland-client` -Wall -Wextra -Wno-unused-parameter -O2 -fno-plt
 SMSG_LDLIBS = `$(PKG_CONFIG) --libs wayland-client`
 
 all: vindle smsg/smsg
@@ -71,7 +71,7 @@ smsg/smsg.o: smsg/smsg.c smsg/dwl-ipc-unstable-v2-protocol.h
 	$(CC) $(SMSG_CFLAGS) -o $@ -c $<
 
 smsg/smsg: smsg/smsg.o smsg/dwl-ipc-unstable-v2-protocol.o
-	$(CC) $^ $(SMSG_CFLAGS) $(SMSG_LDLIBS) -o $@
+	$(CC) $^ $(SMSG_CFLAGS) $(LDFLAGS) $(SMSG_LDLIBS) -o $@
 
 ext-workspace-v1-protocol.h:
 	$(SCANNER) server-header protocols/ext-workspace-v1.xml $@

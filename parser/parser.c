@@ -615,8 +615,8 @@ parse_animations(lua_State *L, CfgAnimations *a)
 	a->tag_vertical   = 0;
 	a->fade_in        = 1;
 	a->fade_out       = 1;
-	a->curve[0] = 0.46f; a->curve[1] = 1.0f;
-	a->curve[2] = 0.29f; a->curve[3] = 0.99f;
+	a->curve[0] = 0.3f; a->curve[1] = 0.5f;
+	a->curve[2] = 0.4f; a->curve[3] = 1.0f;
 
 	lua_getglobal(L, "animations");
 	if (!lua_istable(L, -1)) {

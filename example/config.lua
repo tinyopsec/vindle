@@ -85,7 +85,7 @@ animations = {
     tag_slide      = "horizontal",  -- "horizontal" or "vertical"
     fade_in        = true,  -- fade opacity in on open
     fade_out       = true,  -- fade opacity out on close
-    curve          = { 0.46, 1.0, 0.29, 0.99 },
+    curve          = { 0.3, 0.5, 0.4, 1.0 }, -- gentle ease out: soft start, no tail stall
 }
 
 

@@ -2600,8 +2600,13 @@ requestmonstate(struct wl_listener *listener, void *data)
 
 /* Animations. Clients are configured once at their final size and only
  * the scene graph moves between boxes, so clients never repaint per
- * frame. Geometry eases along a baked cubic bezier; opacity fades run
- * linear, which reads better than an eased fade. */
+ * frame. Geometry eases along a baked cubic bezier (257 points:
+ * fine enough that the piecewise linear interpolation between LUT
+ * nodes does not show as micro stutter). Opacity fades use the same
+ * eased value as the geometry, so colour and movement arrive together
+ * instead of drifting apart. Retargets shorten proportionally to
+ * the remaining distance, which keeps chained moves at a steady
+ * speed instead of restarting the full duration each time. */
 
 static uint32_t
 now_ms(void)
@@ -2611,7 +2616,7 @@ now_ms(void)
 	return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
-#define ANIM_LUT_N 65
+#define ANIM_LUT_N 257
 static float anim_lut_x[ANIM_LUT_N], anim_lut_y[ANIM_LUT_N];
 
 static void
@@ -2806,6 +2811,18 @@ anim_finish(Client *c)
 	c->anim_tagin = 0;
 }
 
+static int
+anim_box_dist(const struct wlr_box *a, const struct wlr_box *b)
+{
+	int dx = a->x - b->x, dy = a->y - b->y;
+	int dw = a->width - b->width, dh = a->height - b->height;
+	if (dx < 0) dx = -dx;
+	if (dy < 0) dy = -dy;
+	if (dw < 0) dw = -dw;
+	if (dh < 0) dh = -dh;
+	return dx + dy + dw + dh;
+}
+
 /* Start or retarget the geometry tween of c toward c->geom. */
 static void
 anim_target(Client *c)
@@ -2852,7 +2869,20 @@ anim_target(Client *c)
 		 * During the open cascade the from box was just recomputed
 		 * from the final geometry above; the mid-flight box was never
 		 * shown (no frame ran between the two resizes), so keeping it
-		 * would fly the window in from its pre-tiling corner (B13). */
+		 * would fly the window in from its pre-tiling corner (B13).
+		 * Shorten by the fraction of distance still left, so a
+		 * retarget near the destination does not replay the full
+		 * duration like a restart (which feels stuttery). */
+		int old = anim_box_dist(&c->anim_from, &c->anim_to);
+		int rem = anim_box_dist(&c->anim_last, &c->geom);
+		if (old > 0 && rem < old) {
+			float r = (float)rem / (float)old;
+			if (r < 0.3f)
+				r = 0.3f;
+			dur = (int)(dur * r);
+			if (dur < 30)
+				dur = 30; /* avoid a pop for tiny hops */
+		}
 		from = c->anim_last;
 		fade = fade || c->anim_fade;
 	}
@@ -2896,9 +2926,10 @@ anim_step(Client *c, uint32_t now)
 	client_draw_box(c, &b);
 	anim_apply_clip(c, &b);
 	if (c->anim_fade) {
-		/* linear alpha mirrors the linear fadeout of close */
-		client_set_tree_opacity(c, (float)p);
-		client_border_alpha(c, (float)p);
+		/* eased alpha moves with the geometry instead of
+		 * racing it linearly */
+		client_set_tree_opacity(c, (float)e);
+		client_border_alpha(c, (float)e);
 	}
 
 	if (p >= 1.0) {
@@ -3126,7 +3157,9 @@ fadeouts_step(Monitor *m, uint32_t now)
 		b.width = f->from.width + (int)llround((f->to.width - f->from.width) * e);
 		b.height = f->from.height + (int)llround((f->to.height - f->from.height) * e);
 
-		fadeout_set_look(f, &b, p);
+		/* geometry eased with the same value, so slide and
+		 * fade finish together */
+		fadeout_set_look(f, &b, e);
 		if (p >= 1.0) {
 			wl_list_remove(&f->link);
 			wlr_scene_node_destroy(&f->tree->node);
