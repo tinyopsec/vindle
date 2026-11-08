@@ -2702,6 +2702,13 @@ client_border_alpha(Client *c, float a)
 	}
 }
 
+static void
+scale_surface_iter(struct wlr_scene_buffer *buf, int sx, int sy, void *data)
+{
+	struct { int w, h; } *sz = data;
+	wlr_scene_buffer_set_dest_size(buf, sz->w, sz->h);
+}
+
 /* Draw the client tree at box b: scene position, surface offset and the
  * eight border rectangles. resize() calls this with c->geom, the
  * animation ticker with the interpolated box. */
@@ -2710,9 +2717,17 @@ client_draw_box(Client *c, const struct wlr_box *b)
 {
 	unsigned int ib = c->ibw, ob = c->obw;
 	int w = b->width, h = b->height;
+	struct { int w, h; } sz = {
+		MAX(1, w - 2 * (int)c->bw),
+		MAX(1, h - 2 * (int)c->bw),
+	};
 
 	wlr_scene_node_set_position(&c->scene->node, b->x, b->y);
 	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
+	/* Keep the content attached to the (possibly animated) border box by
+	 * scaling the surface to the current box size instead of leaving it
+	 * at the final configured size while only the borders move. */
+	wlr_scene_node_for_each_buffer(&c->scene_surface->node, scale_surface_iter, &sz);
 	c->anim_last = *b;
 
 	if (!c->inner_border[0])
@@ -2852,10 +2867,16 @@ anim_target(Client *c)
 		from = anim_edge_box(c, c->anim_tagin);
 		c->anim_tagin = 0;
 	} else {
-		dur = a->duration_move;
 		from = c->anim_last;
 		if (!from.width && !from.height)
 			from = c->geom; /* never drawn yet */
+		/* When this window shrinks to make room for a new one, match
+		 * the open animation's duration and curve so the gap between
+		 * the two windows stays stable instead of drifting. */
+		if (c->geom.width < from.width || c->geom.height < from.height)
+			dur = a->duration_open;
+		else
+			dur = a->duration_move;
 	}
 
 	if (dur <= 0 || (wlr_box_equal(&from, &c->geom) && !fade)) {
@@ -2887,6 +2908,13 @@ anim_target(Client *c)
 		fade = fade || c->anim_fade;
 	}
 
+	/* A move (non-fade) animation must never inherit a half-faded
+	 * opacity left by an interrupted fade: reset to fully opaque so
+	 * the window does not stay semi-transparent mid-transition. */
+	if (!fade) {
+		client_set_tree_opacity(c, 1.0f);
+		client_border_alpha(c, 1.0f);
+	}
 	c->anim_from = from;
 	c->anim_to = c->geom;
 	c->anim_dur = (uint32_t)dur;
@@ -3274,6 +3302,7 @@ resize(Client *c, struct wlr_box geo, int interact)
 	 * in-flight tag slide-in is not cancelled by a redundant resize (e.g.
 	 * a floating client committing its surface mid-animation). */
 	int same_geom = wlr_box_equal(&c->geom, &geo);
+
 	c->geom = geo;
 	applybounds(c, bbox);
 
