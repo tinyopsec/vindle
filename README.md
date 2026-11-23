@@ -112,7 +112,7 @@ Everything below is user visible, no refactors for beauty:
 
 ## Screenshots
 
-<img src="https://github.com/tinyopsec/distrohop/raw/main/assets/void3.webp" width="100%" alt="my rice: vindle on Void Linux">
+<img src="https://raw.githubusercontent.com/tinyopsec/distrohop/main/assets/void7.webp" width="100%" alt="my rice: vindle on Void Linux">
 
 This is my screenshot, vindle on Void Linux
 
